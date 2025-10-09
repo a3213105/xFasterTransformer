@@ -27,7 +27,7 @@
 #include "my_types.h"
 #include "simple_mem_pool.h"
 #include "split_util.h"
-
+#include "thread_util.h"
 namespace fs = std::filesystem;
 
 struct RopeParams {
@@ -192,11 +192,12 @@ public:
         this->numThreads = numThreads;
 
         if (numThreads == 0) {
-#pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                if (tid == 0) { this->numThreads = omp_get_num_threads(); }
-            }
+            this->numThreads = parallel_get_num_threads();
+// # pragma omp parallel
+//             {
+//                 int tid = parallel_get_thread_num();
+//                 if (tid == 0) { this->numThreads = parallel_get_num_threads(); }
+//             }
         }
 
         this->mmHelper = mmHelper;

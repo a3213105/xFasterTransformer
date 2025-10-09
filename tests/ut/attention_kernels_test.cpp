@@ -168,8 +168,8 @@ void testSelfAttention(
 
 #pragma omp parallel
     {
-        int tid = omp_get_thread_num();
-        if (tid == 0) { threadNum = omp_get_num_threads(); }
+        int tid = parallel_get_thread_num();
+        if (tid == 0) { threadNum = parallel_get_num_threads(); }
     }
 
     int totalTokens = 0;
@@ -245,8 +245,8 @@ void testSelfAttention_MLA(int headNum, int nopeDim, int ropeDim, int vHeadDim, 
 
 #pragma omp parallel
     {
-        int tid = omp_get_thread_num();
-        if (tid == 0) { threadNum = omp_get_num_threads(); }
+        int tid = parallel_get_thread_num();
+        if (tid == 0) { threadNum = parallel_get_num_threads(); }
     }
 
     int totalTokens = 0;
@@ -339,8 +339,8 @@ void testCrossAttentionByHead_DS(
 
 #pragma omp parallel
     {
-        int tid = omp_get_thread_num();
-        if (tid == 0) { threadNum = omp_get_num_threads(); }
+        int tid = parallel_get_thread_num();
+        if (tid == 0) { threadNum = parallel_get_num_threads(); }
     }
 
     int totalInTokens = 0;

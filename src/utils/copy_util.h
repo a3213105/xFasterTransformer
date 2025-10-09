@@ -52,12 +52,22 @@ inline void copy_MT(T1 *dst, T2 *src, int size) {
         int blockSize = size / kStep;
         int remainder = size % kStep;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, blockSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < blockSize; ++i) {
+#endif
             __m512 v = load_avx512(0xffff, src + i * kStep);
             store_avx512(dst + i * kStep, 0xffff, v);
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         if (remainder != 0) {
             __mmask16 mask = 0xFFFF >> (kStep - remainder);
             __m512 v = load_avx512(mask, src + size - remainder);

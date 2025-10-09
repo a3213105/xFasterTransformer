@@ -197,21 +197,16 @@ protected:
         float *pbias = intermediateBias.Data();
         float factor = 0.7978845608; // np.sqrt(2 / np.pi)
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, output.Rows()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < output.Rows(); ++i) {
-            // int tid = omp_get_thread_num();
-            // float *pout = output.Row(i);
-            // #pragma omp simd
-            // for (int j = 0; j < output.Cols(); ++j) {
-            //     float x = pout[j] + pbias[j];
-            //     ctx->erf_buffer[tid][j] = x;
-            //     pout[j] = factor * (x + 0.044715f * x * x * x);
-            // }
-            // vsTanh(output.Cols(), pout, pout);
-            // #pragma omp simd
-            // for (int j = 0; j < output.Cols(); ++j) {
-            //     pout[j] = ctx->erf_buffer[tid][j] * 0.5f * (1 + pout[j]);
-            // }
+#endif
             float *pout = output.Row(i);
             const __m512 c1 = _mm512_set1_ps(0.044715f);
             const __m512 c2 = _mm512_set1_ps(factor);
@@ -234,6 +229,9 @@ protected:
                 _mm512_mask_storeu_ps(pout + off, mask, vy);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     //    protected:

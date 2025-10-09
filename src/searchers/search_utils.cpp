@@ -31,8 +31,16 @@ void repetitionPenaltyLogitsProcess(float penalty, float *logits, int sampleOffs
     if (step != 1) { assert(seqLen == 1); }
 
     if (step == 1) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int b = 0; b < batchSize; b++) {
+#endif 
             cachedVec[b].clear();
             cachedVec[b].insert(cachedVec[b].end(), inputIds.begin() + b * seqLen, inputIds.begin() + (b + 1) * seqLen);
             std::sort(cachedVec[b].begin(), cachedVec[b].end());
@@ -50,6 +58,9 @@ void repetitionPenaltyLogitsProcess(float penalty, float *logits, int sampleOffs
                         [sampleOffset](int num) { return num - sampleOffset; });
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     } else {
         if (multiRank) {
             for (int b = 0; b < batchSize; b++) {
@@ -64,14 +75,25 @@ void repetitionPenaltyLogitsProcess(float penalty, float *logits, int sampleOffs
         }
     }
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int b = 0; b < batchSize; b++) {
+#endif     
         int startLogits = b * sampleSize;
         for (int index : cachedVec[b]) {
             float &logit = logits[startLogits + index];
             logit = logit < 0 ? logit * penalty : logit / penalty;
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void stopWordsCheck(std::vector<int> &nextTokenIds, std::vector<std::vector<int>> &stopWordsList,
@@ -115,8 +137,16 @@ void repetitionPenaltyLogitsProcess(
 
     // For prompts
     if (step == 0) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int b = 0; b < batchSize; b++) {
+#endif
             if (seqGroups[b]->getSamplingMeta()->config.repetitionPenalty == 1.0) { continue; }
             SequenceMeta *seqMeta = seqGroups[b]->get(0);
             std::vector<int> &cachedVec = seqGroups[b]->getSamplingMeta()->cachedRepetVec;
@@ -136,10 +166,21 @@ void repetitionPenaltyLogitsProcess(
                         [sampleOffset](int num) { return num - sampleOffset; });
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     } else {
         if (multiRank) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int b = 0; b < batchSize; b++) {
+#endif
                 if (seqGroups[b]->getSamplingMeta()->config.repetitionPenalty == 1.0) { continue; }
                 std::vector<int> inputIds = seqGroups[b]->get(0)->getInputTokens();
                 for (auto x : inputIds) {
@@ -148,20 +189,42 @@ void repetitionPenaltyLogitsProcess(
                     }
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         } else {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int b = 0; b < batchSize; b++) {
+#endif
                 if (seqGroups[b]->getSamplingMeta()->config.repetitionPenalty == 1.0) { continue; }
                 std::vector<int> inputIds = seqGroups[b]->get(0)->getInputTokens();
                 for (auto x : inputIds) {
                     insertAndSort(seqGroups[b]->getSamplingMeta()->cachedRepetVec, x);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
     }
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int b = 0; b < batchSize; b++) {
+#endif
         if (seqGroups[b]->getSamplingMeta()->config.repetitionPenalty == 1.0) { continue; }
         int startLogits = b * sampleSize;
         auto &penalty = seqGroups[b]->getSamplingMeta()->config.repetitionPenalty;
@@ -170,5 +233,8 @@ void repetitionPenaltyLogitsProcess(
             logit = logit < 0 ? logit * penalty : logit / penalty;
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 } // namespace xft

@@ -362,15 +362,8 @@ private:
         if (isMaster) {
             float *pbias = downBias.Data();
             if (downBias.Size() == 0) { pbias = nullptr; }
-            //if (std::is_same_v<WeiT, e4m3_t>) {
-            //    ctx->mmHelper->compute(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, lds);
-//#pragma omp parallel for
-            //    for (size_t i = 0; i < M; ++i)
-            //        xft::addto(C + i * ldc, R + i * ldr, 1.0, N);
-            //} else {
             ctx->mmHelper->compute_residential(
                     false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, pbias, R, ldr, lds);
-	    //}
         } else {
             ctx->mmHelper->compute(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, lds);
         }
@@ -435,12 +428,23 @@ private:
             N /= 2;
         }
         int catStride = trans ? stride * 2 * M : stride;
-#pragma omp parallel for
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<uint64_t>(0, M),
+        [&](const tbb::blocked_range<uint64_t>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (uint64_t i = 0; i < M; ++i) {
+#endif
             memcpy(catWeights.Data() + i * stride, gateWeight.Data() + i * N, N * sizeof(WeiT));
             memcpy(catWeights.Data() + i * stride + catStride / 2, upWeight.Data() + i * N, N * sizeof(WeiT));
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         M = gateWeightScale.Size();
         N = upWeightScale.Size();
         memcpy(catWeightsScale.Data(), gateWeightScale.Data(), M * sizeof(float));
@@ -476,18 +480,42 @@ private:
 
         if (trans) {
             int stride = (param.input_dim + param.block_size0 - 1) / param.block_size0;
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, cols),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < cols; ++i) {
+#endif
                 memcpy(scales.Row(i), param.weight_scale + offset + i * stride, rows * sizeof(float));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
 	} else {
             int stride = (param.output_dim + param.block_size1 - 1) / param.block_size1;
-#pragma omp parallel for collapse(2)
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, cols, 0, rows),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+        for (int j = range.cols().begin(); j < range.cols().end(); ++j) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
             for (int i = 0; i < cols; ++i) {
                 for (int j = 0; j < rows; ++j) {
+#endif
                     memcpy(scales.Row(i) + j, param.weight_scale + (offset + j) * stride + i, sizeof(float));
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
     }
 
@@ -524,28 +552,74 @@ private:
 
         if (trans) {
             int stride = (param1.input_dim + param1.block_size0 - 1) / param1.block_size0;
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, cols1),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < cols1; ++i) {
+#endif
                 memcpy(scales.Row(i), param1.weight_scale + (offset + i) * stride, rows * sizeof(float));
             }
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, cols2),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < cols2; ++i) {
+#endif
                 memcpy(scales.Row(i + cols1), param2.weight_scale + (offset + i) * stride, rows * sizeof(float));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         } else {
             int stride = (param1.output_dim + param1.block_size1 - 1) / param1.block_size1;
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range2d<int, int>(0, cols1, 0, rows),
+            [&](const tbb::blocked_range2d<int, int>& range) {
+            for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+                for (int j = range.cols().begin(); j < range.cols().end(); ++j) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
             for (int i = 0; i < cols1; ++i) {
                 for (int j = 0; j < rows; ++j) {
+#endif
                     memcpy(scales.Row(i) + j, param1.weight_scale + offset + j * stride + i, sizeof(float));
                 }
             }
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range2d<int, int>(0, cols2, 0, rows),
+            [&](const tbb::blocked_range2d<int, int>& range) {
+            for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+                for (int j = range.cols().begin(); j < range.cols().end(); ++j) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
             for (int i = 0; i < cols2; ++i) {
                 for (int j = 0; j < rows; ++j) {
+#endif
                     memcpy(scales.Row(i + cols1) + j, param2.weight_scale + offset + j * stride + i, sizeof(float));
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif        
         }
     }
 

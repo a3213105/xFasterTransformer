@@ -24,6 +24,7 @@
 #include "llm_params.h"
 #include "mlp_llama.h"
 #include "timeline.h"
+#include "thread_util.h"
 
 template <typename WeiT, typename InT = bfloat16_t, typename ImT = bfloat16_t, typename OutT = bfloat16_t>
 class MixtralMLP {
@@ -114,10 +115,21 @@ public:
 
         // Copy if input and output are different, so that the residual connection can be done
         if ((void *)input != (void *)output) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < M; ++i) {
+#endif
                 xft::copy(output + i * oStride, input + i * iStride, hiddenSize);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // Normalize input
@@ -202,27 +214,58 @@ private:
 
     // Gather input for expert i
     void gatherInput(ImT *expertData, int hiddenSize, ImT *input, int iStride, const std::vector<int> &idx) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, idx.size()),
+        [&](const tbb::blocked_range<size_t>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (size_t i = 0; i < idx.size(); ++i) {
+#endif        
             memcpy(expertData + i * hiddenSize, input + idx[i] * iStride, hiddenSize * sizeof(ImT));
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Scatter output of expert i
     void scatterOutput(OutT *output, int oStride, ImT *expertData, int hiddenSize, const std::vector<int> &idx,
             const std::vector<float> &weights) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, idx.size()),
+        [&](const tbb::blocked_range<size_t>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (size_t i = 0; i < idx.size(); ++i) {
+#endif
             float scale = weights[i];
             xft::addto(output + idx[i] * oStride, expertData + i * hiddenSize, scale, hiddenSize);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // logits: [M, N]
     template <typename T>
     void selectTop2Experts(T *logits, int M, int N, int *selExperts, float *expertWeight) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, M / 8),
+        [&](const tbb::blocked_range<size_t>& range) {
+        for (int j = range.begin(); j < range.end(); ++j) {
+            int i = j * 8;
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; i += 8) {
+#endif
             // Process 8 tokens at a time
             if (i + 7 < M) {
 #pragma unroll
@@ -251,6 +294,9 @@ private:
                 }
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Select top 2 experts for one token

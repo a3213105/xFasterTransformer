@@ -23,12 +23,12 @@ std::vector<int> greedySearch(float *logits, int sampleOffset, int sampleSize, i
     TimeLine t("GreedySearch");
 
     Messenger &messenger = Messenger::getInstance();
-    int numThreads = 0;
-#pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
-        if (tid == 0) { numThreads = omp_get_num_threads(); }
-    }
+    int numThreads = parallel_get_num_threads();
+// # pragma omp parallel
+//     {
+//         int tid = parallel_get_thread_num();
+//         if (tid == 0) { numThreads = parallel_get_num_threads(); }
+//     }
 
     auto msgerSize = messenger.getSize();
 
@@ -44,9 +44,18 @@ std::vector<int> greedySearch(float *logits, int sampleOffset, int sampleSize, i
         float maxValues[batchSize * thrPerSample];
 
         // TODO: if size is small, possible to cause out of boundary
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, thrPerSample),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int b = range.rows().begin(); b < range.rows().end(); ++b) {
+            for (int t = range.cols().begin(); t < range.cols().end(); ++t) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
         for (int b = 0; b < batchSize; ++b) {
             for (int t = 0; t < thrPerSample; ++t) { // thread index inside the sample
+#endif
                 int start = t * sizePerThr;
                 int end = (start + sizePerThr) > sampleSize ? sampleSize : (start + sizePerThr);
                 float *p = logits + b * sampleSize;
@@ -65,7 +74,9 @@ std::vector<int> greedySearch(float *logits, int sampleOffset, int sampleSize, i
                 maxValues[b * thrPerSample + t] = maxVal;
             }
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         // Local reduction
         for (int i = 0; i < batchSize; ++i) {
             int *pIndices = maxIndices + i * thrPerSample;
@@ -85,8 +96,16 @@ std::vector<int> greedySearch(float *logits, int sampleOffset, int sampleSize, i
 
     // Each thread handle one sample (one row)
     else {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < batchSize; ++i) {
+#endif 
             int maxId = 0;
             float *p = logits + i * sampleSize;
             float maxVal = p[0];
@@ -99,6 +118,9 @@ std::vector<int> greedySearch(float *logits, int sampleOffset, int sampleSize, i
             maxIds[i] = maxId;
             maxVals[i] = maxVal;
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Reduce to get the max index (any better method??)
@@ -133,8 +155,16 @@ std::vector<int> greedySearch(float *logits, int sampleOffset, int sampleSize, i
 // For greedy search and samlping, not for beam search
 void stopCheck(std::vector<int> &generatedIds, std::vector<SequenceGroupMeta *> &seqGroups) {
     int batchSize = generatedIds.size();
-#pragma omp parallel for
-    for (int b = 0; b < batchSize; b++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+    for (int b = 0; b < batchSize; ++b) {
+#endif 
         // TODO: Deprecate this check, since no need for unequal-length output
         if (seqGroups[b]->getSamplingMeta()->done) {
             generatedIds[b] = seqGroups[b]->getSamplingMeta()->config.eosTokenId;
@@ -151,5 +181,8 @@ void stopCheck(std::vector<int> &generatedIds, std::vector<SequenceGroupMeta *> 
         }
         // TODO: stop words check
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 } // namespace xft

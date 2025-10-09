@@ -111,17 +111,29 @@ void LlamaYaRNScaledRotaryEmbedding::forward(
     //     float sign = ((offset < inv_freq_size) * 1) + ((offset >= inv_freq_size) * -1);
     //     emb[i] += x[(i - i % dim) + offset] * sign * emb_sin[position_ids[i % cached_size / dim]][i % dim];
     // }
-#pragma omp parallel for collapse(3)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, heads, 0, batchSize, 0, seqLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int head = range.pages().begin(); head < range.pages().end(); ++head) {
+        for (int bs = range.rows().begin(); bs < range.rows().end(); ++bs) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3)
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int bs = 0; bs < batchSize; ++bs) {
             for (int seq = 0; seq < seqLen; ++seq) {
+#endif
                 int pos = positionIds[seq];
                 float *pcos = embCos + pos * half;
                 float *psin = embSin + pos * half;
 
                 float *q = query + bs * seqLen * qStride + seq * qStride + head * dim;
                 float *k = key + bs * seqLen * kStride + seq * kStride + head * dim;
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
                 for (int i = 0; i < half; ++i) {
                     if (head < qHeads) {
                         auto q1 = q[i];
@@ -137,6 +149,9 @@ void LlamaYaRNScaledRotaryEmbedding::forward(
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void LlamaYaRNScaledRotaryEmbedding::forward(

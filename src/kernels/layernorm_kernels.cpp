@@ -32,8 +32,16 @@ void invokeLayerNorm(T *output, const T *input, const T *gamma, const T *beta, i
     if (iStride == -1) iStride = size;
     if (oStride == -1) oStride = size;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, rows),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int r = range.begin(); r < range.end(); ++r) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for 
+#   endif
     for (int r = 0; r < rows; ++r) {
+#endif
         const T *px = input + r * iStride;
         T *py = output + r * oStride;
 
@@ -78,6 +86,9 @@ void invokeLayerNorm(T *output, const T *input, const T *gamma, const T *beta, i
             xft::store_avx512(py + col, mask, vy);
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void invokeLayerNorm(bfloat16_t *output, const bfloat16_t *input, const bfloat16_t *gamma, const bfloat16_t *beta,
@@ -87,8 +98,16 @@ void invokeLayerNorm(bfloat16_t *output, const bfloat16_t *input, const bfloat16
     if (iStride == -1) iStride = size;
     if (oStride == -1) oStride = size;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, rows),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int r = range.begin(); r < range.end(); ++r) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for 
+#   endif
     for (int r = 0; r < rows; ++r) {
+#endif
         const bfloat16_t *px = input + r * iStride;
         bfloat16_t *py = output + r * oStride;
 
@@ -133,6 +152,9 @@ void invokeLayerNorm(bfloat16_t *output, const bfloat16_t *input, const bfloat16
             _mm512_mask_storeu_pbh(py + col, mask, vy);
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void invokeLayerNorm(float *output, const float *input, const float *gamma, const float *beta, int rows, int cols,

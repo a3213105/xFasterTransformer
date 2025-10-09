@@ -15,7 +15,8 @@
 
 cmake_minimum_required(VERSION 3.15.1)
 project(xfastertransformer LANGUAGES C CXX)
-
+option(ENABLE_TBB "Build with TBB" ON)
+option(ENABLE_OPENMP "Build with OpenMP" OFF)
 # Enable GPU
 option(WITH_GPU "Build with GPU" OFF)
 if(WITH_GPU)
@@ -38,9 +39,7 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx512f -mavx512bw -mavx512vl -fPIC -D_GLIBCXX_USE_CXX11_ABI=1")
 if(WITH_GPU)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -qopenmp -fsycl -fsycl-device-code-split=per_kernel -lOpenCL")
-else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -fsycl-device-code-split=per_kernel -lOpenCL")
 endif()
 
 # GCC>=10.1 should support avx512bf16, but need to double check as some versions have issues
@@ -93,11 +92,40 @@ if(EXISTS "${LOC_PATH}")
     )
 endif()
 
+set(3RDPART_LIB_LIST "rt" "dl" "dnnl" "numa")
+
 include("cmake/mklml.cmake")
-include("cmake/onednn.cmake")
-include("cmake/xdnn.cmake")
 include("cmake/mkl.cmake")
 include(GNUInstallDirs)
+
+
+if(ENABLE_TBB)
+    find_package(TBB REQUIRED)
+    if(TBB_FOUND)
+        message("Notice: Using Intel TBB.")
+        add_definitions(-DTHREAD_TYPE=0)
+        set(THREAD_DEF "-DTHREAD_TYPE=0")
+        set(THREAD_LIBS "tbb tbbmalloc tbbmalloc_proxy")
+        list(APPEND 3RDPART_LIB_LIST "mkl_intel_ilp64" "mkl_tbb_thread" "mkl_core" "mkl_tbb_thread")
+    else()
+        message(FATAL_ERROR "ERROR: Intel TBB not found!")
+    endif()
+elseif(ENABLE_OPENMP)
+    message("Notice: Using OpenMP.")
+    add_definitions(-DTHREAD_TYPE=1)
+    set(THREAD_DEF "-DTHREAD_TYPE=1")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -fopenmp")
+    set(THREAD_LIBS "")
+    list(APPEND 3RDPART_LIB_LIST "mkl_intel_ilp64" "mkl_intel_thread" "mkl_core" "mkl_intel_thread")
+else()
+    message("Notice: Using Single Threads.")
+    set(THREAD_LIBS "")
+    set(THREAD_DEF "-DTHREAD_TYPE=2")
+    add_definitions(-DTHREAD_TYPE=2)
+endif()
+
+include("cmake/onednn.cmake")
+include("cmake/xdnn.cmake")
 
 set(DEPEND_LIST "onednn" "xdnn_lib")
 
@@ -144,21 +172,17 @@ else()
     link_directories(${CMAKE_SOURCE_DIR}/3rdparty/oneccl/build/_install/lib/prov)
 endif()
 
-set(3RDPART_LIB_LIST "rt" "dl" "dnnl" "numa")
-
-# Enable MKL library
-list(APPEND 3RDPART_LIB_LIST "mkl_intel_ilp64" "mkl_gnu_thread" "mkl_core" "mkl_gnu_thread")
 
 option(BUILD_WITH_SHARED_LIBS "Build with shared libraries" OFF)
 if(BUILD_WITH_SHARED_LIBS)
     message(STATUS "Notice: Building with shared libraries.")
-    list(APPEND 3RDPART_LIB_LIST "xdnn")
+    list(APPEND 3RDPART_LIB_LIST ${XDNN_LIB})
     if(WITH_GPU)
         list(APPEND 3RDPART_LIB_LIST "gpu-dnn")
     endif()
 else()
     message(STATUS "Notice: Building with static libraries.")
-    list(APPEND 3RDPART_LIB_LIST "xdnn_static")
+    list(APPEND 3RDPART_LIB_LIST ${XDNN_STATIC_LIB})
     if(WITH_GPU)
         list(APPEND 3RDPART_LIB_LIST "gpu-dnn")
     endif()

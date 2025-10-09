@@ -19,11 +19,22 @@ static inline void multiThreadCopy(char *dst, char *src, size_t nbytes) {
     constexpr int sizePerSplit = 1024;
     int splits = (nbytes + sizePerSplit - 1) / sizePerSplit;
 
-#pragma omp parallel for
-    for (uint64_t i = 0; i < splits; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, splits),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+    for (int i = 0; i < splits; i++) {
+#endif
         size_t size = (i == splits - 1) ? (nbytes - i * sizePerSplit) : sizePerSplit;
         memcpy(dst + i * sizePerSplit, src + i * sizePerSplit, size);
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 ShmCCL::ShmCCL(int rank, size_t size, std::function<void(int *, size_t)> callback)
@@ -84,7 +95,7 @@ void ShmCCL::reduceAdd(T *sendBuf, T *recvBuf, size_t size, int rank, int rankSi
     size_t nbytes = sizeof(T) * size;
     size_t nBlockBytes = sizeof(T) * SHM_BLOCK_SIZE;
     int nblocks = (size + SHM_BLOCK_SIZE - 1) / SHM_BLOCK_SIZE;
-    int nthreads = std::min(nblocks, omp_get_max_threads());
+    int nthreads = std::min(nblocks, parallel_get_max_threads());
 
     T *address = (T *)shmCtx_.address;
     uint8_t *blocks = (uint8_t *)shmCtx_.blockState;
@@ -102,9 +113,16 @@ void ShmCCL::reduceAdd(T *sendBuf, T *recvBuf, size_t size, int rank, int rankSi
     shmCtx_.state[rank] = 1;
 
     if (rank != 0) {
-#pragma omp parallel for num_threads(nthreads)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, nblocks),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int blockIndex = range.begin(); blockIndex < range.end(); ++blockIndex) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for num_threads(nthreads)
+#   endif
         for (int blockIndex = 0; blockIndex < nblocks; blockIndex++) {
-
+#endif
             T *lSendBuf = sendBuf + SHM_BLOCK_SIZE * blockIndex;
             T *lAddrBuf = address + SHM_BLOCK_SIZE * blockIndex;
             int realBlockSize
@@ -124,6 +142,9 @@ void ShmCCL::reduceAdd(T *sendBuf, T *recvBuf, size_t size, int rank, int rankSi
             shmCtx_.blockState[blockIndex * rankSize + rank - 1] = 0;
             shmCtx_.blockState[blockIndex * rankSize + rank] = 1;
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         shmCtx_.state[rank] = 2;
     }
 

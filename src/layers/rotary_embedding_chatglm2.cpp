@@ -46,10 +46,21 @@ ChatGLM2RotaryEmbedding::ChatGLM2RotaryEmbedding(DecoderContext *ctx) {
     if (!initialized) {
         float *inv_freq = (float *)malloc(this->inv_freq_size * sizeof(float));
 
-#pragma omp parallel for
-        for (size_t i = 0; i < inv_freq_size; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, inv_freq_size),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+        for (int i = 0; i < inv_freq_size; i++) {
+#endif  
             inv_freq[i] = 1.0 / pow(base, float(i * 2) / dim);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         glm2CalEmb(inv_freq);
         free(inv_freq);
     } else if (dim != inv_freq_size * 2) {
@@ -60,31 +71,23 @@ ChatGLM2RotaryEmbedding::ChatGLM2RotaryEmbedding(DecoderContext *ctx) {
 
 // This API is deprecated, will delete after all rotary embed code refactor.
 ChatGLM2RotaryEmbedding::ChatGLM2RotaryEmbedding(const int dim, const int max_position_embeddings, const float base) {
-        //     if (!initialized) {
-        //         initialized = true;
-
-        //         this->max_position_embeddings = max_position_embeddings;
-        //         inv_freq_size = (dim + 1) / 2;
-        //         inv_freq = (float *)malloc(inv_freq_size * sizeof(float));
-        // #pragma omp parallel for
-        //         for (size_t i = 0; i < inv_freq_size; i++) {
-        //             inv_freq[i] = 1.0 / pow(base, float(i * 2) / dim);
-        //         }
-
-        //         glm2CalEmb();
-        //     } else if (dim != inv_freq_size * 2) {
-        //         printf("Incorrect dim=%d, inv_freq_size=%d\n", dim, inv_freq_size);
-        //         exit(-1);
-        //     }
 };
 
 void ChatGLM2RotaryEmbedding::glm2CalEmb(const float *inv_freq) {
-#pragma omp parallel for
-    for (size_t i = 0; i < this->max_position_embeddings; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, this->max_position_embeddings),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+    for (int i = 0; i < this->max_position_embeddings; i++) {
+#endif  
         float *pcos = emb_cos + i * inv_freq_size * 2;
         float *psin = emb_sin + i * inv_freq_size * 2;
 
-        for (size_t j = 0; j < inv_freq_size; j++) {
+        for (int j = 0; j < inv_freq_size; j++) {
             float tmp = i * inv_freq[j];
             float cos_tmp = std::cos(tmp);
             float sin_tmp = std::sin(tmp);
@@ -95,6 +98,9 @@ void ChatGLM2RotaryEmbedding::glm2CalEmb(const float *inv_freq) {
             psin[j + inv_freq_size] = sin_tmp;
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 // def apply_rotary_pos_emb(x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
@@ -121,23 +127,35 @@ void ChatGLM2RotaryEmbedding::forward(
         float *query, float *key, int qStride, int kStride, const int *qk_shape, const int *position_ids) {
     int dim = inv_freq_size * 2;
     REQUIRES(dim == qk_shape[3], "Incorrect shape, last dimention is not the head size.");
-    const int batch_size = qk_shape[0];
-    const int seq_len = qk_shape[1];
-    const int head_num = qk_shape[2] + qk_shape[4];
+    const int batchSize = qk_shape[0];
+    const int seqLen = qk_shape[1];
+    const int heads = qk_shape[2] + qk_shape[4];
     const int half = inv_freq_size;
-
-#pragma omp parallel for
-    for (int head = 0; head < head_num; ++head) {
-        int off = head * dim;
-        for (int bs = 0; bs < batch_size; ++bs) {
-            for (int seq = 0; seq < seq_len; ++seq) {
+ 
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, heads, 0, batchSize, 0, seqLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int head = range.pages().begin(); head < range.pages().end(); ++head) {
+        for (int bs = range.rows().begin(); bs < range.rows().end(); ++bs) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3)
+#   endif
+    for (int head = 0; head < heads; ++head) {
+        for (int bs = 0; bs < batchSize; ++bs) {
+            for (int seq = 0; seq < seqLen; ++seq) {
+#endif
+                int off = head * dim;
                 float *p1 = query + off;
 
                 int pos = position_ids[seq];
                 float *pcos = emb_cos + pos * dim;
                 float *psin = emb_sin + pos * dim;
 
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
                 for (int i = 0; i < half; i += 2) {
                     auto t1 = p1[i];
                     p1[i] = p1[i] * pcos[i] - p1[i + 1] * psin[i];
@@ -147,6 +165,9 @@ void ChatGLM2RotaryEmbedding::forward(
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void ChatGLM2RotaryEmbedding::forward(

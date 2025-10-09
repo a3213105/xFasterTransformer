@@ -15,14 +15,21 @@
 #include "rotary_embedding_kernels.h"
 #include "compile_util.h"
 #include "intrinsics_util.h"
-
+#include "thread_util.h"
 namespace xft {
 
 void llamaSetCosSinCache(
         const float *invFreq, float *embCos, float *embSin, int invFreqSize, int maxPositionEmbeddings, float scale) {
-
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, maxPositionEmbeddings),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for 
+#   endif
     for (size_t i = 0; i < maxPositionEmbeddings; i++) {
+#endif
         float *pcos = embCos + i * invFreqSize;
         float *psin = embSin + i * invFreqSize;
 
@@ -35,6 +42,9 @@ void llamaSetCosSinCache(
             psin[j] = sinTmp;
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 // def rotate_half(x):
@@ -67,10 +77,20 @@ static inline void llamaApplyRotaryPosEmbeding(T *query, T *key, int qStride, in
     const int heads = std::max(qHeads, kHeads);
     const int half = inv_freq_size;
 
-#pragma omp parallel for collapse(3)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, heads, 0, batchSize, 0, seqLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int head = range.pages().begin(); head < range.pages().end(); ++head) {
+        for (int bs = range.rows().begin(); bs < range.rows().end(); ++bs) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) 
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int bs = 0; bs < batchSize; ++bs) {
             for (int seq = 0; seq < seqLen; ++seq) {
+#endif
                 int pos = positionIds[seq];
                 float *pcos = emb_cos + pos * half;
                 float *psin = emb_sin + pos * half;
@@ -110,6 +130,9 @@ static inline void llamaApplyRotaryPosEmbeding(T *query, T *key, int qStride, in
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void llamaApplyRotaryPosEmbeding(float *query, float *key, int qStride, int kStride, float *emb_cos, float *emb_sin,
@@ -137,9 +160,18 @@ static inline void llamaApplyRotaryPosEmbed(T *query, T *key, float *emb_cos, fl
     const int half = (dim + 1) / 2;
     const int heads = std::max(qHeads, kHeads);
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, heads, 0, totSeqLen),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int head = range.rows().begin(); head < range.rows().end(); ++head) {
+        for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int seq = 0; seq < totSeqLen; ++seq) {
+#endif
             int pos = positionIds[seq];
             float *pcos = emb_cos + pos * half;
             float *psin = emb_sin + pos * half;
@@ -178,6 +210,9 @@ static inline void llamaApplyRotaryPosEmbed(T *query, T *key, float *emb_cos, fl
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void llamaApplyRotaryPosEmbed(float *query, float *key, float *emb_cos, float *emb_sin, int qStride, int kStride,
@@ -232,16 +267,26 @@ static inline void chatglm2ApplyRotaryPosEmbeding(T *query, T *key, int qStride,
         float *emb_sin, int inv_freq_size, const int *qk_shape, const int *position_ids) {
     int dim = inv_freq_size * 2;
     REQUIRES(dim == qk_shape[3], "Incorrect shape, last dimention is not the head size.");
-    const int batch_size = qk_shape[0];
-    const int seq_len = qk_shape[1];
-    const int head_num = qk_shape[2] + qk_shape[4];
+    const int batchSize = qk_shape[0];
+    const int seqLen = qk_shape[1];
+    const int heads = qk_shape[2] + qk_shape[4];
     const int half = inv_freq_size;
 
-#pragma omp parallel for collapse(3)
-    for (int head = 0; head < head_num; ++head) {
-        for (int bs = 0; bs < batch_size; ++bs) {
-            for (int seq = 0; seq < seq_len; ++seq) {
-                T *pF = query + bs * seq_len * qStride + seq * qStride + head * dim;
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, heads, 0, batchSize, 0, seqLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int head = range.pages().begin(); head < range.pages().end(); ++head) {
+        for (int bs = range.rows().begin(); bs < range.rows().end(); ++bs) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) 
+#   endif
+    for (int head = 0; head < heads; ++head) {
+        for (int bs = 0; bs < batchSize; ++bs) {
+            for (int seq = 0; seq < seqLen; ++seq) {
+#endif
+                T *pF = query + bs * seqLen * qStride + seq * qStride + head * dim;
 
                 int pos = position_ids[seq];
                 float *pcos = emb_cos + pos * dim;
@@ -275,6 +320,9 @@ static inline void chatglm2ApplyRotaryPosEmbeding(T *query, T *key, int qStride,
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void chatglm2ApplyRotaryPosEmbeding(float *query, float *key, int qStride, int kStride, float *emb_cos, float *emb_sin,
@@ -301,12 +349,21 @@ template <typename T>
 static inline void chatglm2ApplyRotaryPosEmbed(T *query, T *key, float *emb_cos, float *emb_sin, int qStride,
         int kStride, int inv_freq_size, int totSeqLen, int qHeads, int kHeads, const int *positionIds) {
     int dim = inv_freq_size * 2;
-    const int head_num = qHeads + kHeads;
+    const int heads = qHeads + kHeads;
     const int half = inv_freq_size;
 
-#pragma omp parallel for collapse(2)
-    for (int head = 0; head < head_num; ++head) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, heads, 0, totSeqLen),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int head = range.rows().begin(); head < range.rows().end(); ++head) {
+        for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+    for (int head = 0; head < heads; ++head) {
         for (int seq = 0; seq < totSeqLen; ++seq) {
+#endif
             T *pF = query + seq * qStride + head * dim;
 
             int pos = positionIds[seq];
@@ -340,6 +397,9 @@ static inline void chatglm2ApplyRotaryPosEmbed(T *query, T *key, float *emb_cos,
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void chatglm2ApplyRotaryPosEmbed(float *query, float *key, float *emb_cos, float *emb_sin, int qStride, int kStride,
@@ -379,10 +439,21 @@ static inline void qwenApplyRotaryPosEmbeding(T *query, T *key, int qStride, int
     REQUIRES(kv_len < maxSupportedSeqLength, "process seq length must less than 32768.");
 
     const float *q_scale = logn + pastKeyLength;
-#pragma omp parallel for collapse(3)
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, heads, 0, batchSize, 0, seqLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int head = range.pages().begin(); head < range.pages().end(); ++head) {
+        for (int bs = range.rows().begin(); bs < range.rows().end(); ++bs) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) 
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int bs = 0; bs < batchSize; ++bs) {
             for (int seq = 0; seq < seqLen; ++seq) {
+#endif
                 int pos = positionIds[seq];
                 float *pcos = cur_emb_cos + pos * dim;
                 float *psin = cur_emb_sin + pos * dim;
@@ -428,6 +499,9 @@ static inline void qwenApplyRotaryPosEmbeding(T *query, T *key, int qStride, int
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void qwenApplyRotaryPosEmbeding(float *query, float *key, int qStride, int kStride, float *cur_emb_cos,
@@ -458,9 +532,18 @@ static inline void qwenApplyRotaryPosEmbed(T *query, T *key, float *emb_cos, flo
     const int half = (dim + 1) / 2;
     const int heads = std::max(qHeads, kHeads);
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, heads, 0, totSeqLen),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int head = range.rows().begin(); head < range.rows().end(); ++head) {
+        for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int seq = 0; seq < totSeqLen; ++seq) {
+#endif
             int pos = positionIds[seq];
 
             float *pcos = emb_cos + pos * dim;
@@ -503,6 +586,9 @@ static inline void qwenApplyRotaryPosEmbed(T *query, T *key, float *emb_cos, flo
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void qwenApplyRotaryPosEmbed(float *query, float *key, float *emb_cos, float *emb_sin, int qStride, int kStride,
@@ -541,10 +627,20 @@ static inline void teleChatApplyRotaryPosEmbeding(T *query, T *key, int qStride,
     const int heads = std::max(qHeads, kHeads);
     const int half = inv_freq_size;
 
-#pragma omp parallel for collapse(3)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, heads, 0, batchSize, 0, seqLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int head = range.pages().begin(); head < range.pages().end(); ++head) {
+        for (int bs = range.rows().begin(); bs < range.rows().end(); ++bs) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) 
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int bs = 0; bs < batchSize; ++bs) {
             for (int seq = 0; seq < seqLen; ++seq) {
+#endif
                 int pos = positionIds[seq];
                 float *pcos = cur_emb_cos + pos * dim;
                 float *psin = cur_emb_sin + pos * dim;
@@ -586,6 +682,9 @@ static inline void teleChatApplyRotaryPosEmbeding(T *query, T *key, int qStride,
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void teleChatApplyRotaryPosEmbeding(float *query, float *key, int qStride, int kStride, float *cur_emb_cos,
@@ -612,9 +711,18 @@ static inline void teleChatApplyRotaryPosEmbed(T *query, T *key, float *emb_cos,
     const int half = (dim + 1) / 2;
     const int heads = std::max(qHeads, kHeads);
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, heads, 0, totSeqLen),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int head = range.rows().begin(); head < range.rows().end(); ++head) {
+        for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int seq = 0; seq < totSeqLen; ++seq) {
+#endif
             int pos = positionIds[seq];
 
             float *pcos = emb_cos + pos * dim;
@@ -653,6 +761,9 @@ static inline void teleChatApplyRotaryPosEmbed(T *query, T *key, float *emb_cos,
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void teleChatApplyRotaryPosEmbed(float *query, float *key, float *emb_cos, float *emb_sin, int qStride, int kStride,
@@ -709,13 +820,21 @@ static inline void deepseekv2ApplyRotaryPosEmbed(T *query, T *key, float *embCos
         const int nopeDim) {
     int dim = invFreqSize * 2;
     int query_dim = nopeDim + dim;
-    const int head_num = qHeads + kHeads;
+    const int heads = qHeads + kHeads;
     const int half = invFreqSize;
 // k = k.view(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
 // k_embed = (k * cos) + (rotate_half(k) * sin)
     __mmask16 mask = 0xffff;
-#pragma omp parallel for collapse(1)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, totSeqLen),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int seq = range.begin(); seq < range.end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for 
+#   endif
     for (int seq = 0; seq < totSeqLen; ++seq) {
+#endif
         T *pK = key + seq * kStride;
         T *pQ = query + seq * qStride;
 
@@ -748,9 +867,21 @@ static inline void deepseekv2ApplyRotaryPosEmbed(T *query, T *key, float *embCos
         deepseekv2DeinterleaveQK(pQ, dim);
         deepseekv2DeinterleaveQK(pK, dim);
     }
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(1, qHeads, 0, totSeqLen),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int head = range.rows().begin(); head < range.rows().end(); ++head) {
+        for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
     for (int head = 1; head < qHeads; ++head) {
         for (int seq = 0; seq < totSeqLen; ++seq) {
+#endif
             T *pQ = query + seq * qStride + head * query_dim;
 
             int pos = positionIds[seq];
@@ -776,6 +907,9 @@ static inline void deepseekv2ApplyRotaryPosEmbed(T *query, T *key, float *embCos
             deepseekv2DeinterleaveQK(pQ, dim);
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void deepseekv2ApplyRotaryPosEmbed(float *query, float *key, float *embCos, float *embSin, int qStride, int kStride,
@@ -808,7 +942,7 @@ static inline void llamaApplyRotaryPosEmbeding(void *device, T *query, T *key, i
     const int seqLen = qkShape[1];
     const int qHeads = qkShape[2];
     const int kHeads = qkShape[4];
-    const int head_num = std::max(qHeads, kHeads);
+    const int heads = std::max(qHeads, kHeads);
     const int head_size = qkShape[3];
     const int half_head_size = (head_size + 1) / 2;
     using namespace sycl;
@@ -817,7 +951,7 @@ static inline void llamaApplyRotaryPosEmbeding(void *device, T *query, T *key, i
     sycl::buffer<int, 1> positionIdsBuf(positionIds, sycl::range<1>(seqLen));
     gpu_queue->submit([&](sycl::handler &cgh) {
         sycl::accessor position(positionIdsBuf, cgh, sycl::read_only);
-        sycl::range<3> globalSize(batchSize * seqLen, head_num, half_head_size);
+        sycl::range<3> globalSize(batchSize * seqLen, heads, half_head_size);
         sycl::range<3> workGroupSize(1, 1, 1);
 
         cgh.parallel_for(sycl::nd_range(globalSize, workGroupSize), [=](sycl::nd_item<3> item) {

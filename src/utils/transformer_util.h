@@ -19,6 +19,7 @@
 #include <cstdio>
 
 #include "compile_util.h"
+#include "thread_util.h"
 
 class TransformerUtil {
 public:
@@ -26,9 +27,16 @@ public:
     static void layerNorm(float *x, float *y, const float *gamma, const float *beta, int rows, int cols, int stride,
             const float epsilon = 1e-6) {
         int size = cols;
-
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, rows),
+    [&](const tbb::blocked_range<int>& range) {
+        for (int r = range.begin(); r < range.end(); ++r) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int r = 0; r < rows; ++r) {
+#endif
             float *px = x + r * stride;
             float *py = y + r * stride;
 
@@ -73,15 +81,28 @@ public:
                 _mm512_mask_storeu_ps(py + col, mask, vy);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 #else
     static void layerNorm(float *x, float *y, const float *gamma, const float *beta, int rows, int cols, int stride) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, rows),
+    [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < rows; ++i) {
+#endif
             float sum = 0;
             float *px = x + i * stride;
             float *py = y + i * stride;
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int j = 0; j < cols; ++j) {
                 sum += px[j];
             }
@@ -89,7 +110,9 @@ public:
             float mean = sum / cols;
 
             sum = 0;
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int j = 0; j < cols; ++j) {
                 float delta = (px[j] - mean);
                 sum += delta * delta;
@@ -97,11 +120,16 @@ public:
             float tmp = sum / cols + 9.999999960041972e-13;
             float rvariance = 1.0f / sqrt(tmp);
 
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int j = 0; j < cols; ++j) {
                 py[j] = (px[j] - mean) * rvariance * gamma[j] + beta[j];
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 #endif
 

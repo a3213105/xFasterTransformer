@@ -146,8 +146,16 @@ void SampleSearch::sample(std::tuple<float *, int, int> &result) {
 
     // Do topK during splited outputs on each sample
     // Each thread handle one sample (one row)
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int i = 0; i < batchSize; ++i) {
+#endif 
         std::vector<std::pair<float, int>> elements(sampleSize);
         for (int j = 0; j < sampleSize; j++) {
             elements[j] = std::make_pair(*(outBuf + i * sampleSize + j), j);
@@ -160,6 +168,9 @@ void SampleSearch::sample(std::tuple<float *, int, int> &result) {
             topKIds[i * topK + j] = elements[j].second + sampleOffset;
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 
     // Reduce to get the topK index during all batch's sample
     if (msgerSize > 1) {
@@ -175,8 +186,16 @@ void SampleSearch::sample(std::tuple<float *, int, int> &result) {
         std::vector<long unsigned int> recvCount(msgerSize, static_cast<long unsigned int>(sendSize));
         messenger.allgatherv(sendBuf, sendSize, recvBuf, recvCount);
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int batchIdx = range.begin(); batchIdx < range.end(); ++batchIdx) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int batchIdx = 0; batchIdx < batchSize; ++batchIdx) {
+#endif 
             std::vector<std::pair<float, int>> elements(msgerSize * topK);
             for (int i = 0; i < msgerSize; ++i) {
                 int idx = (i * batchSize + batchIdx) * topK;
@@ -193,6 +212,9 @@ void SampleSearch::sample(std::tuple<float *, int, int> &result) {
                 topKIds[batchIdx * topK + i] = elements[i].second;
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // 2. Divided by temperature.
@@ -205,8 +227,16 @@ void SampleSearch::sample(std::tuple<float *, int, int> &result) {
     // 3. Get topP candidates, at least 2.
     std::vector<int> topPNums(batchSize, topK);
     if (topP < 1.0) {
-#pragma omp parallel for
-        for (int batchIdx = 0; batchIdx < batchSize; batchIdx++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int batchIdx = range.begin(); batchIdx < range.end(); ++batchIdx) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+        for (int batchIdx = 0; batchIdx < batchSize; ++batchIdx) {
+#endif
             float probs[topK];
             float probs_sum = 0;
             float cursum = 0;
@@ -223,14 +253,25 @@ void SampleSearch::sample(std::tuple<float *, int, int> &result) {
                 }
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // 4. Sample.
     std::random_device rd;
     std::default_random_engine generator(rd());
     std::uniform_real_distribution<float> distribution(0.0, 1.0);
-#pragma omp parallel for
-    for (int batchIdx = 0; batchIdx < batchSize; batchIdx++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int batchIdx = range.begin(); batchIdx < range.end(); ++batchIdx) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+    for (int batchIdx = 0; batchIdx < batchSize; ++batchIdx) {
+#endif
         float cursum = 0;
         float randomValue = distribution(generator);
 
@@ -245,6 +286,9 @@ void SampleSearch::sample(std::tuple<float *, int, int> &result) {
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 
     if (msgerSize > 1) { messenger.broadcast(nextTokens.data(), nextTokens.size()); }
 

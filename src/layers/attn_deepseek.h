@@ -79,15 +79,25 @@ public:
         int mergedDim = mlap->q_a_proj.output_dim + mlap->kv_a_proj.output_dim;
         WeiT *buffer = (WeiT *)aligned_alloc(64, ctx->hiddenSize * mergedDim * sizeof(WeiT));
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, ctx->hiddenSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (uint64_t i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < ctx->hiddenSize; ++i) {
+#endif
             memcpy(buffer + i * mergedDim, (WeiT *)mlap->q_a_proj.weight + i * mlap->q_a_proj.output_dim,
                     mlap->q_a_proj.output_dim * sizeof(WeiT));
             memcpy(buffer + i * mergedDim + mlap->q_a_proj.output_dim,
                     (WeiT *)mlap->kv_a_proj.weight + i * mlap->kv_a_proj.output_dim,
                     mlap->kv_a_proj.output_dim * sizeof(WeiT));
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         // Pack the merged weights
         qkvAWeights.Resize(ctx->hiddenSize, mergedDim);
         xft::Matrix mergedW(buffer, ctx->hiddenSize, mergedDim, mergedDim);
@@ -291,8 +301,17 @@ public:
             TimeLine t("kv_cache");
             auto getK = [&](int b, int headIdx, int seqIdx) { return keyCaches[b]->getSequence(seqIdx, 0, headIdx); };
             auto getV = [&](int b, int headIdx, int seqIdx) { return valueCaches[b]->getSequence(seqIdx, 0, headIdx); };
-#pragma omp parallel for
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, totInSeqLen),
+            [&](const tbb::blocked_range<int>& range) {
+            for (uint64_t i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < totInSeqLen; ++i) {
+#endif
                 int b = 0, s = i;
                 while (s >= tokenSizes[b]) {
                     s -= tokenSizes[b];
@@ -304,6 +323,9 @@ public:
                 // Compressed KV
                 xft::copy(getV(b, 0, seqIdx).first, kvNormBuffer.Row(i), ctx->kvLoraRank);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // KV up projection
@@ -417,14 +439,25 @@ private:
             // Each head contains dense.input_dim(512) * dimPerHead(128) elements
             kUpTrans.Resize(endHead - startHead, dense.input_dim * dimPerHead);
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(startHead, endHead),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int h = range.begin(); h < range.end(); ++h) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int h = startHead; h < endHead; ++h) {
+#endif
                 xft::Matrix<TTarget> w(
                         (TTarget *)dense.weight + h * headStride, dense.input_dim, dimPerHead, dense.output_dim);
 
                 xft::Matrix<TTarget> subMat(kUpTrans.Row(h - startHead), dimPerHead, dense.input_dim, dense.input_dim);
                 ctx->mmHelper->packWeight(true, w, subMat);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
         else {
             xft::Logger::error("Unsupported data type for DS attention");
@@ -532,12 +565,23 @@ private:
         // transpose for xddn fp8 kernel
         scales.Resize(cols, rows);
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, cols),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < cols; ++i) {
+#endif
             for (int j = 0; j < rows; ++j) {
                 memcpy(scales.Row(i) + j, param.weight_scale + splitOffset + j * stride + i, sizeof(float));
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif 
     }
 
     // Prepare FP8 scales by merging 2 scales into 1
@@ -565,18 +609,40 @@ private:
         // transpose for xddn fp8 kernel
         scales.Resize(cols1 + cols2, rows);
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, cols1),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < cols1; ++i) {
+#endif
             for (int j = 0; j < rows; ++j) {
                 memcpy(scales.Row(i) + j, param1.weight_scale + j * cols1 + i, sizeof(float));
             }
         }
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif  
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, cols2),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < cols2; ++i) {
+#endif
             for (int j = 0; j < rows; ++j) {
                 memcpy(scales.Row(i + cols1) + j, param2.weight_scale + j * cols2 + i, sizeof(float));
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     template <typename Lambda1, typename Lambda2>
@@ -590,14 +656,25 @@ private:
         int rows = src.Rows();
         int cols = src.Cols();
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, rows),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < rows; ++i) {
+#endif
             for (int j = 0; j < cols; j += 64) {
                 int size = std::min(64, cols - j);
                 float s = scale.Row(getScaleRow(i))[getScaleCol(j)];
                 e4m3_t::to_bf16(src.Row(i) + j, (uint16_t *)dst.Row(i) + j, size, s);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     template <typename T>

@@ -79,11 +79,22 @@ public:
                 shared_expert->template setWeights<WType>(ctx, &ffn->sharedExpert);
             }
             // setWeights for each expert
-#pragma omp parallel for num_threads(std::min(omp_get_max_threads(), 64))
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, expertNum),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for num_threads(std::min(parallel_get_num_threads(), 64))
+#   endif
             for (int i = 0; i < expertNum; ++i) {
+#endif
                 ffn->routedExperts[i].expid = i;
                 experts[i]->template setWeights<WType>(ctx, ffn->routedExperts[i]);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // Check the size of dense expert, im size is intermediateSize or moeIntermediateSize * n_shared_experts
@@ -142,10 +153,21 @@ public:
             TimeLine t("MoE_Copy_Residual");
             // Copy if input and output are different, so that the residual connection can be done
             if ((void *)input != (void *)output) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
                 for (int i = 0; i < M; ++i) {
+#endif
                     xft::copy(output + i * oStride, input + i * iStride, hiddenSize);
                 }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                });
+#endif
             }
         }
 #ifdef XFT_DEBUG
@@ -378,30 +400,60 @@ private:
 
     // Gather input for expert i
     void gatherInput(ImT *expertData, int hiddenSize, ImT *input, int iStride, const std::vector<int> &idx) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, idx.size()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (size_t i = 0; i < idx.size(); ++i) {
+#endif
             memcpy(expertData + i * hiddenSize, input + idx[i] * iStride, hiddenSize * sizeof(ImT));
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Scatter output of expert i
     void scatterOutput(OutT *output, int oStride, ImT *expertData, int hiddenSize, const std::vector<int> &idx,
             const std::vector<float> &weights) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, idx.size()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (size_t i = 0; i < idx.size(); ++i) {
+#endif
             float scale = weights[i];
-            //#pragma omp critical
+            //# pragma omp critical
             {
                 xft::addto(output + idx[i] * oStride, expertData + i * hiddenSize, scale, hiddenSize);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // logits: [M, N]
     template <typename T>
     void computingSigmoid(T *logits, int M, int N) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, M),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; ++i) {
+#endif        
             // compute sigmoid, 1.0 / (1.0 + exp(-x)) + scoreCorrBias
             __m512 v1 = _mm512_set1_ps(1.0f);
             __m512 vzero = _mm512_set1_ps(0.0f);
@@ -415,6 +467,9 @@ private:
                 xft::store_avx512(logits + i * N + j, mask, sgmd);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // logits: [M, N]
@@ -422,37 +477,79 @@ private:
     template <typename T>
     void scoresGroupExperts(T *logits, int M, int N, int nGroups, float *groupWeight, float *scoreCorrBias) {
         int groupSize = N / nGroups;
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, M, 0, nGroups),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+            for (int j = range.cols().begin(); j < range.cols().end(); ++j) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
         for (int i = 0; i < M; ++i) {
             for (int j = 0; j < nGroups; ++j) {
+#endif
                 sumTop2ExpertsInGroupWithBias(logits + i * N + j * groupSize, groupSize, groupWeight + i * nGroups + j,
                     scoreCorrBias + j * groupSize);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     template <typename T>
     void selectTopKGroups(T *groupWeight, int M, int nGroups, int *selGroups, int topkGroup) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, M),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; ++i) {
+#endif  
             topK(groupWeight + i * nGroups, nGroups, topkGroup, selGroups + i * topkGroup, nullptr);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     template <typename T>
     void maskedSelectTopKExperts(T *gateLogits, int M, int N, int nGroups, int *selGroups, int topkGroup, int *selExperts,
             float *expertWeight, int topkExpert, float *corrBias) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, M),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; ++i) {
+#endif  
             topKMasked(gateLogits + i * N, topkExpert, selGroups + i * topkGroup, N / nGroups, topkGroup,
                 selExperts + i * topkExpert, expertWeight + i * topkExpert, corrBias);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     void scaleNormTopKExpertsWeight(float *expertWeight, int M, int topkExpert, bool normProb, float routedScalingFac) {
         // topkExpert is 8 (commonly less than 16), so use avx512 to speed up the normalization to make them sum 1
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, M),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; ++i) {
+#endif  
             __m512 vscale = _mm512_set1_ps(routedScalingFac);
             if (normProb) {
                 float sum = 0.0f;
@@ -472,6 +569,9 @@ private:
                 xft::store_avx512(expertWeight + i * topkExpert + j, mask, _mm512_mul_ps(v, vscale));
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Select top 2 experts in one group for one token

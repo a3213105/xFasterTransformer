@@ -26,6 +26,8 @@
 
 #include "bit_cast.h"
 
+#include "thread_util.h"
+
 class float16_t {
 public:
     float16_t() = default;
@@ -170,8 +172,16 @@ inline void float16_t::cvt_float_to_float16_MT(const float *src, float16_t *dst,
     int remainder = size % kStep;
 
     // Process blocks of 16 floats at a time
-#pragma omp parallel for
-    for (int i = 0; i < blockSize; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, blockSize),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+    for (int i = 0; i < blockSize; i++) {
+#endif
         // Load the input floats into a AVX512 register
         __m512 input_vector = _mm512_loadu_ps(src + i * kStep);
 
@@ -181,7 +191,9 @@ inline void float16_t::cvt_float_to_float16_MT(const float *src, float16_t *dst,
         // Store the converted values in the output array
         _mm256_mask_storeu_epi16(dst + i * kStep, 0xffff, output_vector);
     }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
     if (remainder != 0) {
         __mmask16 mask = 0xFFFF >> (kStep - remainder);
         __m512 input_vector = _mm512_maskz_loadu_ps(mask, src + size - remainder);
@@ -216,13 +228,23 @@ inline void float16_t::cvt_float16_to_float_MT(const float16_t *src, float *dst,
     int blockSize = size / kStep;
     int remainder = size % kStep;
 
-#pragma omp parallel for
-    for (int i = 0; i < blockSize; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, blockSize),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+    for (int i = 0; i < blockSize; i++) {
+#endif
         __m256i input_vector = _mm256_maskz_loadu_epi16(0xffff, src + i * kStep);
         __m512 output_vector = _mm512_cvtph_ps(input_vector);
         _mm512_storeu_ps(dst + i * kStep, output_vector);
     }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
     if (remainder != 0) {
         __mmask16 mask = 0xFFFF >> (kStep - remainder);
         __m256i input_vector = _mm256_maskz_loadu_epi16(mask, src + size - remainder);

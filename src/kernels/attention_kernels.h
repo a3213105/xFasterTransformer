@@ -221,9 +221,18 @@ void selfAttention_SeparateCopy(T *output, T *query, T *key, T *value, int qHead
     // Copy key/value to cache and pack them
     // If packing is not fused into computing, then pack it here
     if constexpr (!FusedPack) {
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, kvHeadNum),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int b = range.rows().begin(); b > range.rows().end(); ++b) {
+            for (int i = range.cols().begin(); i < range.cols().end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
         for (int b = 0; b < batchSize; ++b) {
             for (int i = 0; i < kvHeadNum; ++i) {
+#endif
                 const int tokens = tokenSizes[b];
 
                 T *packedB = packBuf + (b * kvHeadNum + i) * (kPackSize + vPackSize);
@@ -250,6 +259,9 @@ void selfAttention_SeparateCopy(T *output, T *query, T *key, T *value, int qHead
                         false, headSize, tokens, (XDNN_BF16 *)V, kvStride, (XDNN_BF16 *)packedV, vPackSize);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     } else { // just copy
         parallel_for(kvHeadNum * totalTokenSize, [&](int taskIdx) {
             auto gSeqIdx = taskIdx / kvHeadNum; // global seq index
@@ -294,7 +306,7 @@ void selfAttention_SeparateCopy(T *output, T *query, T *key, T *value, int qHead
         int mb = offset % blkSize; // block index along M dimension inside the sample
         int groupNum = qHeadNum / kvHeadNum;
 
-        int tid = omp_get_thread_num();
+        int tid = parallel_get_thread_num();
         int kvHeadIdx = (headMap == nullptr) ? i / groupNum : headMap(i);
         int locationIdx = (FusedPack ? tid : b * kvHeadNum + kvHeadIdx);
         T *packedB = packBuf + locationIdx * (kPackSize + vPackSize);
@@ -312,7 +324,7 @@ void selfAttention_SeparateCopy(T *output, T *query, T *key, T *value, int qHead
         int ldb = kvStride;
         int ldc = (tokens + 31) / 32 * 32;
         auto A = query + (offsets[b] + startSeq) * qStride + i * headSize;
-        auto C = scores + omp_get_thread_num() * mBlockSize * maxScoreStride;
+        auto C = scores + parallel_get_thread_num() * mBlockSize * maxScoreStride;
 
         if constexpr (FusedPack) {
             if (packInfo[tid].first != b || packInfo[tid].second != kvHeadIdx) {
@@ -432,7 +444,7 @@ void selfAttention_FusedCopy(T *output, T *query, T *key, T *value, int qHeadNum
 #endif
 
     auto oneHeadCompute = [&](int b, int i) {
-            int tid = omp_get_thread_num();
+            int tid = parallel_get_thread_num();
             const int tokens = tokenSizes[b];
             const int mBlockNum = (tokens + mBlockSize - 1) / mBlockSize;
 
@@ -528,12 +540,24 @@ void selfAttention_FusedCopy(T *output, T *query, T *key, T *value, int qHeadNum
         };
 
     if (allSameSize) {
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, qHeadNum),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int b = range.rows().begin(); b > range.rows().end(); ++b) {
+            for (int h = range.cols().begin(); h < range.cols().end(); ++h) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
         for (int b = 0; b < batchSize; ++b) {
             for (int h = 0; h < qHeadNum; ++h) {
+#endif
                 oneHeadCompute(b, h);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        }); 
+#endif
     }
     else {
         int threadEndHead[threadNum];
@@ -603,10 +627,18 @@ void selfAttention_MLA(T *output, T *query, T *keyRope, T *keyValue, int headNum
     // Pack keyRope, keyNope and value
     // If packing is not fused into computing, then pack it here
     if constexpr (!FusedPack) {
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, headNum+1),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int b = range.rows().begin(); b > range.rows().end(); ++b) {
+            for (int i = range.cols().begin(); i < range.cols().end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
         for (int b = 0; b < batchSize; ++b) {
-            // keyRope is taken as the last head
             for (int i = 0; i < headNum + 1; ++i) {
+#endif
                 const int tokens = tokenSizes[b];
 
                 if (i == headNum) { // pack keyRope for batch b
@@ -631,6 +663,9 @@ void selfAttention_MLA(T *output, T *query, T *keyRope, T *keyValue, int headNum
                         false, vHeadDim, tokens, (XDNN_BF16 *)V, kvStride, (XDNN_BF16 *)packedV, vPackSize);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        }); 
+#endif
     } else { // Only pack keyRope
         for (int b = 0; b < batchSize; ++b) {
             const int tokens = tokenSizes[b];
@@ -667,7 +702,7 @@ void selfAttention_MLA(T *output, T *query, T *keyRope, T *keyValue, int headNum
         int i = offset / blkSize; // head index
         int mb = offset % blkSize; // block index along M dimension inside the sample
 
-        int tid = omp_get_thread_num();
+        int tid = parallel_get_thread_num();
         int kvHeadIdx = i;
         int locationIdx = (FusedPack ? tid : b * headNum + kvHeadIdx);
         T *packedB = packBuf + locationIdx * (kNopePackSize + vPackSize);
@@ -771,11 +806,12 @@ void selfAttention(T *output, T *query, T *key, T *value, int qHeadNum, int kvHe
         int threadNum, const Lambda1 &getKCache, const Lambda2 &getVCache, std::function<int(int)> headMap = nullptr) {
     // Revise threadNum if not set
     if (unlikely(threadNum <= 0)) {
-#pragma omp parallel
-        {
-            int tid = omp_get_thread_num();
-            if (tid == 0) { threadNum = omp_get_num_threads(); }
-        }
+        threadNum = parallel_get_num_threads();
+// # pragma omp parallel
+//         {
+//             int tid = parallel_get_thread_num();
+//             if (tid == 0) { threadNum = parallel_get_num_threads(); }
+//         }
     }
 
     float efficiency = (batchSize * qHeadNum) / (std::ceil(1.0f * batchSize * qHeadNum / threadNum) * threadNum);
@@ -873,10 +909,20 @@ void crossAttnShardedHead(T1 *output, const T1 *query, int inputSeqLen, int pres
     size_t totalBufSize = threadNum * sizePerThread * sizeof(float);
     float *tmpBuf = (float *)SimpleMemPool::instance().getBuffer("tmpBuf", totalBufSize);
 
-#pragma omp parallel for collapse(3)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, batchSize, 0, responsibleHeads, 0, splits),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int b = range.pages().begin(); b > range.pages().end(); ++b) {
+        for (int i = range.rows().begin(); i > range.rows().end(); ++i) {
+            for (int s = range.cols().begin(); s < range.cols().end(); ++s) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
     for (int b = 0; b < batchSize; ++b) {
         for (int i = 0; i < responsibleHeads; ++i) {
             for (int s = 0; s < splits; ++s) {
+#endif
                 int headStartIdx = b * responsibleHeads * splits + i * splits;
                 int threadIdx = b * responsibleHeads * splits + i * splits + s;
 
@@ -983,6 +1029,9 @@ void crossAttnShardedHead(T1 *output, const T1 *query, int inputSeqLen, int pres
             } // end for s
         } // end for i
     } // end for b
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 /**
@@ -1040,10 +1089,20 @@ void crossAttnByHead(T *output, const T *query, const T *key, const T *value, in
         innerHeadNum = responsibleHeads;
     }
 
-#pragma omp parallel for collapse(3)
-    for (int outh = 0; outh < outerHeadNum; ++outh) {
-        for (int b = 0; b < batchSize; ++b) {
-            for (int inh = 0; inh < innerHeadNum; ++inh) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, outerHeadNum, 0, batchSize, 0, innerHeadNum),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int outh = range.pages().begin(); outh > range.pages().end(); ++outh) {
+        for (int b = range.rows().begin(); b > range.rows().end(); ++b) {
+            for (int inh = range.cols().begin(); inh < range.cols().end(); ++inh) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
+    for (int b = 0; b < batchSize; ++b) {
+        for (int i = 0; i < responsibleHeads; ++i) {
+            for (int s = 0; s < splits; ++s) {
+#endif
                 int i = outh * innerHeadNum + inh;
                 // Copy current key to cached keys (if needed)
                 int kvHdx = (headMap == nullptr) ? i / groupNum : headMap(i);
@@ -1053,7 +1112,7 @@ void crossAttnByHead(T *output, const T *query, const T *key, const T *value, in
 
                 // Q * K
                 auto Q = query + inputOffsets[b] * qStride + i * headSize;
-                auto S = scoreBuf + omp_get_thread_num() * scoreSizePerThr;
+                auto S = scoreBuf + parallel_get_thread_num() * scoreSizePerThr;
 
                 const int queryLen = inputSeqLens[b];
                 const int keyLen = pastSeqLens[b] + inputSeqLens[b];
@@ -1120,6 +1179,9 @@ void crossAttnByHead(T *output, const T *query, const T *key, const T *value, in
             } // end for inner head
         } // end for b
     } // end for outer head
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 // Cross attention for MLA, modified from crossAttnByHead
@@ -1151,9 +1213,18 @@ void crossAttnByHead_DS(T *output, const T *query, const T **keyRope, const T **
     size_t scoreSize = scoreSizePerThr * threadNum;
     float *scoreBuf = (float *)SimpleMemPool::instance().getBuffer("scoreBuf", sizeof(float) * scoreSize);
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, headNum, 0, batchSize),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int h = range.rows().begin(); h > range.rows().end(); ++h) {
+        for (int b = range.cols().begin(); b < range.cols().end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
     for (int h = 0; h < headNum; ++h) {
         for (int b = 0; b < batchSize; ++b) {
+#endif
             const int queryLen = inputSeqLens[b];
             const int keyLen = pastSeqLens[b] + inputSeqLens[b];
 
@@ -1161,7 +1232,7 @@ void crossAttnByHead_DS(T *output, const T *query, const T **keyRope, const T **
             bfloat16_t tmp[queryLen * 512];
 
             // Q*Kᵀ, Q*Kᵀ=Q1*(DWₖ)ᵀ+Q2*Krᵀ=Q1*Wₖᵀ*Dᵀ+Q2*Krᵀ
-            auto S = scoreBuf + omp_get_thread_num() * scoreSizePerThr;
+            auto S = scoreBuf + parallel_get_thread_num() * scoreSizePerThr;
             {
                 auto Q = query + qOffsets[b] * qStride + h * qkHeadDim;
                 int m = queryLen;
@@ -1203,6 +1274,9 @@ void crossAttnByHead_DS(T *output, const T *query, const T **keyRope, const T **
             }
         } // end for b
     } // end for outer head
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 // Cross attention for MLA, modified from crossAttnByHead
@@ -1232,14 +1306,23 @@ void crossAttnByHead_DS(T *output, const T *query, const T **keyRope, const T *k
     size_t scoreSize = scoreSizePerThr * threadNum;
     float *scoreBuf = (float *)SimpleMemPool::instance().getBuffer("scoreBuf", sizeof(float) * scoreSize);
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, headNum, 0, batchSize),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int h = range.rows().begin(); h > range.rows().end(); ++h) {
+        for (int b = range.cols().begin(); b < range.cols().end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
     for (int h = 0; h < headNum; ++h) {
         for (int b = 0; b < batchSize; ++b) {
+#endif
             const int queryLen = inputSeqLens[b];
             const int keyLen = pastSeqLens[b] + inputSeqLens[b];
 
             // Q * K
-            auto S = scoreBuf + omp_get_thread_num() * scoreSizePerThr;
+            auto S = scoreBuf + parallel_get_thread_num() * scoreSizePerThr;
             {
                 auto Q = query + qOffsets[b] * qStride + h * qkHeadDim;
                 int m = queryLen;
@@ -1278,6 +1361,9 @@ void crossAttnByHead_DS(T *output, const T *query, const T **keyRope, const T *k
             }
         } // end for b
     } // end for outer head
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 // scaled dot-product attention: bmm1 + softmax + bmm2
@@ -1338,15 +1424,25 @@ void selfScaledDpAttention(T *output, const T *query, const AttnT *key, const At
         qArr[i] = thrBuf + srcBlk * threadNum * (4 + tgtBlk + headSize) + srcBlk * headSize * i;
     }
 
-#pragma omp parallel for collapse(3) schedule(dynamic)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, batchSize, 0, qHeadNum, 0, maxSrcLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int b = range.pages().begin(); b > range.pages().end(); ++b) {
+        for (int h = range.rows().begin(); h > range.rows().end(); ++h) {
+            for (int m = range.cols().begin(); m < range.cols().end(); m+=srcBlk) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) schedule(dynamic)
+#   endif
     for (uint64_t b = 0; b < batchSize; ++b) {
         for (int h = 0; h < qHeadNum; ++h) {
             for (int m = 0; m < maxSrcLen; m += srcBlk) {
+#endif
                 int srcLen = inputSeqLens[b];
                 int tgtLen = inputSeqLens[b] + pastSeqLens[b];
                 if (m >= srcLen) { continue; }
 
-                int tid = omp_get_thread_num();
+                int tid = parallel_get_thread_num();
                 int qRealBlk = std::min(srcBlk, srcLen - m);
                 uint64_t srcOff = seqStartLoc[b] * qStride + h * headSize;
                 uint64_t outOff = seqStartLoc[b] * oStride + h * headSize;
@@ -1356,14 +1452,18 @@ void selfScaledDpAttention(T *output, const T *query, const AttnT *key, const At
 
                 // reset out
                 for (int ii = 0; ii < qRealBlk; ++ii) {
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
                     for (int jj = 0; jj < headSize; ++jj) {
                         out[ii * oStride + jj] = 0; // reset output
                         q[ii * headSize + jj] = (AttnT)(qbuf[ii * qStride + jj]); // reset output
                     }
                 }
                 // reset sum
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
                 for (int ii = 0; ii < qRealBlk; ++ii) {
                     preSum[tid][ii] = 0;
                     sum[tid][ii] = 0;
@@ -1404,6 +1504,9 @@ void selfScaledDpAttention(T *output, const T *query, const AttnT *key, const At
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
     return;
 }
 

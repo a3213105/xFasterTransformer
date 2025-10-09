@@ -39,9 +39,16 @@ public:
         TimeLine t("DecoderUtil::rmsNorm");
         float *pweight = normWeight.Data();
         int size = x.Cols();
-
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, x.Rows()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int r = range.begin(); r < range.end(); ++r) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int r = 0; r < x.Rows(); ++r) {
+#endif
             float *px = x.Row(r);
             float *py = y.Row(r);
 
@@ -83,6 +90,9 @@ public:
                 _mm512_mask_storeu_ps(py + col, mask, vy);
             }
         } // end for rows
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif 
     }
 
     static void layerNorm(
@@ -97,8 +107,16 @@ public:
             return;
         }
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, x.Rows()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int r = range.begin(); r < range.end(); ++r) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int r = 0; r < x.Rows(); ++r) {
+#endif
             float *px = x.Row(r);
             float *py = y.Row(r);
 
@@ -144,6 +162,9 @@ public:
                 _mm512_mask_storeu_ps(py + col, mask, vy);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Layer norm for small matrix with just a one Rrow
@@ -158,8 +179,17 @@ public:
         float *px = x.Row(0);
         float *py = y.Row(0);
 
-#pragma omp parallel for reduction(+ : sum) reduction(+ : squareSum)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    oneapi::tbb::combinable<float> local_sum(sum), local_squareSum(squareSum);
+    tbb::parallel_for(tbb::blocked_range<int>(0, splitNum),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int s = range.begin(); s < range.end(); ++s) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for reduction(+ : sum) reduction(+ : squareSum)
+#   endif
         for (int s = 0; s < splitNum; ++s) {
+#endif
             __m512 vsum = _mm512_set1_ps(0);
             __m512 vsqare = _mm512_set1_ps(0);
 
@@ -178,10 +208,21 @@ public:
                 vsqare = _mm512_add_ps(vsqare, tmp);
             }
 
-            sum += _mm512_reduce_add_ps(vsum);
-            squareSum += _mm512_reduce_add_ps(vsqare);
+            float tmp_sum =  _mm512_reduce_add_ps(vsum);
+            float tmp_squareSum =  _mm512_reduce_add_ps(vsqare);
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            local_sum.local() += tmp_sum;
+            local_squareSum.local() += tmp_squareSum;
+#else
+            sum += tmp_sum;
+            squareSum += tmp_squareSum;
+#endif
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+        sum = local_sum.combine( []( const float& x, const float& y ) {return x+y;} );
+        squareSum = local_squareSum.combine( []( const float& x, const float& y ) {return x+y;} );
+#endif
         // Mean
         float mean = sum / size;
 
@@ -189,8 +230,16 @@ public:
         const float epsilon = 1e-5; // use the default value in PyTorch
         float var = 1 / sqrt(squareSum / size - mean * mean + epsilon);
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, splitNum),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int s = range.begin(); s < range.end(); ++s) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int s = 0; s < splitNum; ++s) {
+#endif
             __m512 vmean = _mm512_set1_ps(mean);
             __m512 vvar = _mm512_set1_ps(var);
 
@@ -207,6 +256,9 @@ public:
                 _mm512_mask_storeu_ps(py + col, mask, vy);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 #else
     static void layerNorm(DecoderContext *ctx, xft::Matrix<float> &x, xft::Matrix<float> &y, xft::Vector<float> &gamma,
@@ -218,19 +270,31 @@ public:
         float *pgamma = gamma.Data();
         float *pbeta = beta.Data();
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, x.Rows()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < x.Rows(); ++i) {
+#endif
             float sum = 0;
             float *px = x.Row(i);
             float *py = y.Row(i);
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int j = 0; j < x.Cols(); ++j) {
                 sum += px[j];
             }
             float mean = sum / ctx->hiddenSize;
 
             sum = 0;
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int j = 0; j < x.Cols(); ++j) {
                 float delta = (px[j] - mean);
                 sum += delta * delta;
@@ -238,11 +302,16 @@ public:
             float tmp = sum / ctx->hiddenSize + 9.999999960041972e-13;
             float rvariance = 1.0f / sqrt(tmp);
 
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int j = 0; j < x.Cols(); ++j) {
                 py[j] = (px[j] - mean) * rvariance * pgamma[j] + pbeta[j];
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 #endif
 
@@ -526,10 +595,19 @@ public:
     static void siluSumBatch(T1 *input[], T2 *output[], int batchSize, int seqLen, int *cols) {
         __m512 one = _mm512_set1_ps(1.f);
         __m512 negOne = _mm512_set1_ps(-1.f);
-#pragma omp parallel for collapse(2)
-        for (int64_t b = 0; b < batchSize; ++b) {
-            for (int64_t i = 0; i < seqLen; ++i) {
-                for (int64_t j = 0; j < cols[b] / 2; j += 16) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, seqLen),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int b = range.rows().begin(); b < range.rows().end(); ++b) {
+            for (int i = range.cols().begin(); i < range.cols().end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+        for (int b = 0; b < batchSize; ++b) {
+            for (int i = 0; i < seqLen; ++i) {
+#endif
+                for (int j = 0; j < cols[b] / 2; j += 16) {
                     T1 *src = input[b] + i * cols[b] + j;
                     T2 *dst = output[b] + i * cols[b] + j;
                     int remain = cols[b] / 2 - j;
@@ -544,6 +622,9 @@ public:
                 }
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // compute silu on the left half and then add it with the right half
@@ -556,9 +637,18 @@ public:
         int N = stride / 2;
         int ldd = dst.Stride();
 
-#pragma omp parallel for collapse(2)
-        for (int64_t i = 0; i < M; ++i) {
-            for (int64_t j = 0; j < N; j += 16) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, M, 0, N/16),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+            for (int j = range.cols().begin() * 16; j < range.cols().end() * 16; j+=16) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; j += 16) {
+#endif
                 int remain = N - j;
                 __mmask16 mask = (remain >= 16 ? 0xffff : (1 << remain) - 1);
                 auto left = xft::load_avx512(mask, src.Data() + i * stride + j);
@@ -570,6 +660,9 @@ public:
                 xft::store_avx512(dst.Data() + i * ldd + j, mask, res);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 #endif
 
@@ -586,9 +679,18 @@ public:
         const int N = stride / 2;
         const int ldd = dst.Stride();
 
-#pragma omp parallel for collapse(2)
-        for (int64_t i = 0; i < M; ++i) {
-            for (int64_t j = 0; j < N; j += 16) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, M, 0, N/16),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+            for (int j = range.cols().begin() * 16; j < range.cols().end() * 16; j+=16) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; j += 16) {
+#endif
                 int remain = N - j;
                 __mmask16 mask = (remain >= 16 ? 0xffff : (1 << remain) - 1);
                 auto vx = xft::load_avx512(mask, src.Data() + i * stride + j);
@@ -601,6 +703,9 @@ public:
                 xft::store_avx512(dst.Data() + i * ldd + j, mask, res);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // C = A * B

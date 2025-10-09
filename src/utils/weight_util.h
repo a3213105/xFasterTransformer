@@ -32,6 +32,8 @@
 #include "normal_float4x2.h"
 #include "uint4x2.h"
 
+#include <atomic>
+
 namespace xft {
 
 inline DataType getWeightType(const std::string &ini_file, std::string section_name = "") {
@@ -70,7 +72,7 @@ inline DataType getWeightType(const std::string &ini_file, std::string section_n
 template <typename T>
 int readFile(const std::string &path, T *values, int size) {
     int count = 0;
-    int nthreads = std::min(omp_get_max_threads(), 16);
+    int nthreads = std::min(parallel_get_max_threads(), 16);
     int chunk_size = (size + nthreads - 1) / nthreads;
     Env &env = Env::getInstance();
     if (env.getFakeModelEnabled()) {
@@ -87,19 +89,35 @@ int readFile(const std::string &path, T *values, int size) {
         if (file.is_open()) file.close();
     }
 
-#pragma omp parallel num_threads(nthreads) reduction(+ : count)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_reduce(tbb::blocked_range<int>(0, parallel_get_num_threads()), count, 
+    [&](const tbb::blocked_range<int>& range, int partial_sum) {
+#elif THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel num_threads(nthreads) reduction(+ : count)
+#endif
     {
         std::ifstream file(path, std::ios::binary);
-        int tid = omp_get_thread_num();
+        int tid = parallel_get_thread_num();
         int start_idx = tid * chunk_size;
         int end_idx = std::min(start_idx + chunk_size, size);
         if (file.is_open()) {
             file.seekg(start_idx * sizeof(T), std::ios::beg);
             file.read(reinterpret_cast<char *>(values + start_idx), (end_idx - start_idx) * sizeof(T));
-            count += end_idx - start_idx;
             file.close();
+        } else {
+            printf("open file %s failed\n", path.c_str());
+            end_idx = start_idx;
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        partial_sum += end_idx - start_idx;
+        return partial_sum;
+#else
+        count += end_idx - start_idx;
+#endif
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    }, std::plus<int>());
+#endif
     return count;
 }
 

@@ -38,11 +38,21 @@ QwenRotaryEmbedding::QwenRotaryEmbedding(const int dim, const int max_position_e
         this->max_seq_len_cached = max_position_embeddings;
         this->inv_freq_size = (dim + 1) / 2;
         float *inv_freq = (float *)malloc(this->inv_freq_size * sizeof(float));
-#pragma omp parallel for
-        for (size_t i = 0; i < this->inv_freq_size; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, this->inv_freq_size),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+        for (int i = 0; i < this->inv_freq_size; i++) {
+#endif
             inv_freq[i] = 1.0 / pow(base, float(i * 2) / dim);
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         QwenCalEmb(inv_freq, base, embCosSin);
         free(inv_freq);
 
@@ -80,15 +90,37 @@ void QwenRotaryEmbedding::init_logn(int max_seq_length, bool use_logn, bool use_
             max_seq_length = maxSupportedSeqLength;
         }
         logn = (float *)malloc(maxSupportedSeqLength * 2 * sizeof(float));
-#pragma omp parallel for
-        for (size_t i = 0; i < max_seq_length; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, max_seq_length),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+        for (int i = 0; i < max_seq_length; i++) {
+#endif
             logn[i] = 1.0;
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         float log_base = log(max_seq_length);
-#pragma omp parallel for
-        for (size_t i = max_seq_length; i < maxSupportedSeqLength; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(max_seq_length, maxSupportedSeqLength),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+        for (int i = max_seq_length; i < maxSupportedSeqLength; i++) {
+#endif
             logn[i] = log(i + 1) / log_base;
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 }
 
@@ -109,8 +141,16 @@ void QwenRotaryEmbedding::QwenCalEmb(
 
     embCosSin[base] = std::make_tuple(emb_cos, emb_sin);
 
-#pragma omp parallel for
-    for (size_t i = 0; i < this->max_seq_len_cached; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, this->max_seq_len_cached),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+    for (int i = 0; i < this->max_seq_len_cached; i++) {
+#endif
         float *pcos = emb_cos + i * this->inv_freq_size * 2;
         float *psin = emb_sin + i * this->inv_freq_size * 2;
 
@@ -125,6 +165,9 @@ void QwenRotaryEmbedding::QwenCalEmb(
             psin[j + this->inv_freq_size] = sin_tmp;
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 // def rotate_half(x):
@@ -186,10 +229,21 @@ void QwenRotaryEmbedding::forward(
         auto it = embCosSin.find(new_base);
         if (it == embCosSin.end()) {
             float *inv_freq = (float *)malloc(this->inv_freq_size * sizeof(float));
-#pragma omp parallel for
-            for (size_t i = 0; i < this->inv_freq_size; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, this->inv_freq_size),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < this->inv_freq_size; i++) {
+#endif
                 inv_freq[i] = 1.0 / pow(new_base, float(i * 2) / dim);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
             QwenCalEmb(inv_freq, new_base, embCosSin);
             free(inv_freq);
         }
@@ -211,17 +265,30 @@ void QwenRotaryEmbedding::forward(
             query = query * logn_tensor.expand_as(query)
     ***/
     float *q_scale = logn + pastKeyLength;
-#pragma omp parallel for collapse(3)
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, heads, 0, batchSize, 0, seqLen),
+    [&](const tbb::blocked_range3d<int, int, int>& range) {
+    for (int head = range.pages().begin(); head < range.pages().end(); ++head) {
+        for (int bs = range.rows().begin(); bs < range.rows().end(); ++bs) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3)
+#   endif
     for (int head = 0; head < heads; ++head) {
         for (int bs = 0; bs < batchSize; ++bs) {
             for (int seq = 0; seq < seqLen; ++seq) {
+#endif
                 int pos = positionIds[seq];
                 float *pcos = cur_emb_cos + pos * dim;
                 float *psin = cur_emb_sin + pos * dim;
 
                 float *q = query + bs * seqLen * qStride + seq * qStride + head * dim;
                 float *k = key + bs * seqLen * kStride + seq * kStride + head * dim;
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
                 for (int i = 0; i < half; ++i) {
                     if (head < qHeads) {
                         auto q1 = q[i];
@@ -237,6 +304,9 @@ void QwenRotaryEmbedding::forward(
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void QwenRotaryEmbedding::forward(
@@ -262,10 +332,21 @@ void QwenRotaryEmbedding::forward(
         auto it = embCosSin.find(new_base);
         if (it == embCosSin.end()) {
             float *inv_freq = (float *)malloc(this->inv_freq_size * sizeof(float));
-#pragma omp parallel for
-            for (size_t i = 0; i < this->inv_freq_size; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, this->inv_freq_size),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < this->inv_freq_size; i++) {
+#endif
                 inv_freq[i] = 1.0 / pow(base, float(i * 2) / dim);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
             QwenCalEmb(inv_freq, new_base, embCosSin);
             free(inv_freq);
         }
@@ -297,10 +378,21 @@ void QwenRotaryEmbedding::forward(
         auto it = embCosSin.find(new_base);
         if (it == embCosSin.end()) {
             float *inv_freq = (float *)malloc(this->inv_freq_size * sizeof(float));
-#pragma omp parallel for
-            for (size_t i = 0; i < this->inv_freq_size; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, this->inv_freq_size),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < this->inv_freq_size; i++) {
+#endif
                 inv_freq[i] = 1.0 / pow(base, float(i * 2) / dim);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
             QwenCalEmb(inv_freq, new_base, embCosSin);
             free(inv_freq);
         }

@@ -44,12 +44,24 @@ void KVCacheManager<KVCacheT>::expandCache(int layerId, int userSideBS, int beam
     pTensors[0] = &this->cachedKeys[layerId];
     pTensors[1] = &this->cachedValues[layerId];
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, 2, 0, seqLen),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+        for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
     for (int i = 0; i < 2; ++i) {
         for (int seq = 0; seq < seqLen; ++seq) {
+#endif
             pTensors[i]->expandOneSequence(userSideBS, beamSize, seq);
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 template <typename KVCacheT>
@@ -66,9 +78,18 @@ void KVCacheManager<KVCacheT>::expandPrefixCache(int layerId, int userSideBS, in
     int headSize = dstTensors[0]->getHeadSize();
 
     if (!Env::getInstance().getKVTransEnabled()) {
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, 2, 0, seqLen),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
         for (int i = 0; i < 2; ++i) {
             for (int seq = 0; seq < seqLen; ++seq) {
+#endif
                 auto src = srcTensors[i]->getSequence(seq, 0, 0);
                 for (int b = userSideBS - 1; b >= 0; --b) {
                     auto dst = dstTensors[i]->getSequence(seq, b, 0);
@@ -79,10 +100,23 @@ void KVCacheManager<KVCacheT>::expandPrefixCache(int layerId, int userSideBS, in
                 }
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     } else {
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, 2, 0, userSideBS),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+            for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+                int b = userSideBS - 1 - seq;
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
         for (int i = 0; i < 2; ++i) {
             for (int b = userSideBS - 1; b >= 0; --b) {
+#endif
                 auto srcInfo = srcTensors[i]->getHead(b, 0);
                 auto src = std::get<0>(srcInfo);
                 auto srcStride = std::get<1>(srcInfo);
@@ -99,6 +133,9 @@ void KVCacheManager<KVCacheT>::expandPrefixCache(int layerId, int userSideBS, in
                 }
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 }
 
@@ -107,8 +144,16 @@ void KVCacheManager<KVCacheT>::expandPrefixCache(int layerId, int userSideBS, in
 template <typename KVCacheT>
 void KVCacheManager<KVCacheT>::reorderCache(int *idx, int size, int initSeqLen, int accSeqLen) {
     // Reorder for all the layers
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, 2 * this->layers),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int i = 0; i < 2 * this->layers; ++i) {
+#endif
         int layer = i / 2;
         if (i % 2 == 0) {
             KVCacheTensor<KVCacheT> &keyTensor = this->getKey(layer);
@@ -118,6 +163,9 @@ void KVCacheManager<KVCacheT>::reorderCache(int *idx, int size, int initSeqLen, 
             valueTensor.reorder(idx, size, initSeqLen, accSeqLen);
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 template class KVCacheManager<float16_t>;

@@ -507,11 +507,22 @@ public:
         MlpOutT *lnIn = embBuf;
         if (inputSeqLen > 1 && !logitsAll) { // copy is not needed when seqLen = 1 or logitsAll is true
             lnIn = outBuf;
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int b = range.begin(); b < range.end(); ++b) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int b = 0; b < batchSize; ++b) {
+#endif
                 xft::memcopy(lnIn + b * hiddenSize, embBuf + ((b + 1) * inputSeqLen - 1) * hiddenSize,
                         hiddenSize * sizeof(MlpOutT), ctx->device ? ctx->device : nullptr);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
 #ifdef XFT_DEBUG
@@ -572,12 +583,23 @@ public:
         if (step == 0 && beamSize > 1) {
             for (int b = userSideBS - 1; b >= 0; --b) {
                 float *src = finalOut + b * splitSize;
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                tbb::parallel_for(tbb::blocked_range<int>(b * beamSize, (b + 1) * beamSize),
+                [&](const tbb::blocked_range<int>& range) {
+                for (int idx = range.begin(); idx < range.end(); ++idx) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
                 for (int idx = b * beamSize; idx < (b + 1) * beamSize; ++idx) {
+#endif
                     if (idx == b) { continue; }
                     float *dst = finalOut + idx * splitSize;
                     memcpy(dst, src, splitSize * sizeof(float));
                 }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                });
+#endif
             }
         }
 

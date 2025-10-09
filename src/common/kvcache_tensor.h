@@ -152,23 +152,47 @@ public:
         }
 
         if (!Env::getInstance().getKVTransEnabled()) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, seqLen),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int seq = range.begin(); seq < range.end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int seq = 0; seq < seqLen; ++seq) {
+#endif
                 for (int b = batchSize - 1; b > 0; --b) {
                     T *dst = getSequence(seq, b, 0);
                     T *src = getSequence(seq, b / beamSize, 0);
                     memcpy(dst.first, src.first, sizeof(T) * headNum * headSize);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         } else {
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, headNum),
+            [&](const tbb::blocked_range2d<int, int>& range) {
+            for (int bb = range.rows().begin(); bb > range.rows().end(); ++bb) {
+                int b = batchSize - 1 - bb;
+                for (int h = range.cols().begin(); h < range.cols().end(); ++h) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
             for (int b = batchSize - 1; b > 0; --b) {
                 for (int h = 0; h < headNum; ++h) {
+#endif
                     auto dst = getHead(b, h);
                     auto src = getHead(b / beamSize, h);
                     memcpy(std::get<0>(dst), std::get<0>(src), sizeof(T) * seqLen * headSize);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
     }
 
@@ -181,15 +205,28 @@ public:
                 if constexpr (std::is_same_v<T, int8_t>) { memcpy(dst.second, src.second, sizeof(float) * headNum); }
             }
         } else {
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, headNum),
+            [&](const tbb::blocked_range2d<int, int>& range) {
+            for (int bb = range.rows().begin(); bb > range.rows().end(); ++bb) {
+                int b = batchSize - 1 - bb;
+                for (int h = range.cols().begin(); h < range.cols().end(); ++h) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
             for (int b = batchSize - 1; b > 0; --b) {
                 for (int h = 0; h < headNum; ++h) {
+#endif
                     auto dst = getSequence(seq, b, h);
                     auto src = getSequence(seq, b / beamSize, h);
                     memcpy(dst.first, src.first, sizeof(T) * headSize);
                     if constexpr (std::is_same_v<T, int8_t>) { memcpy(dst.second, src.second, sizeof(float)); }
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
     }
 

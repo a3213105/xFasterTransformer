@@ -49,8 +49,16 @@ public:
         int blockSize = hiddenSize / kStep;
         int remainder = hiddenSize % kStep;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, tokenSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < tokenSize; ++i) {
+#endif
             int id = tokenIds[i];
             auto src = this->embTable + id * hiddenSize;
             auto dst = output + i * hiddenSize;
@@ -66,6 +74,9 @@ public:
                 store_avx512(dst + hiddenSize - remainder, mask, _mm512_mul_ps(v, vdim));
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     int getVocabSize() { return vocabSize; }

@@ -310,15 +310,26 @@ public:
     // Does not support in-place transpose
     static void transpose(float *A, float *B, int rows, int cols) {
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, rows, 0, cols),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int i = range.rows().begin(); i < range.rows().end(); i+=16) {
+            for (int j = range.cols().begin(); j < range.cols().end(); j+=16) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
         for (int i = 0; i < rows; i += 16) {
             for (int j = 0; j <= cols; j += 16) {
+#endif
                 float *pA = A + i * cols + j;
                 float *pB = B + j * rows + i;
                 transpose16(A, i, j, rows, cols, B);
             }
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         // Remaining rows
         if (rows % 16 != 0) {
             int startRow = rows - (rows % 16);

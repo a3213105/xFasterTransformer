@@ -57,8 +57,16 @@ void RotaryEmbedding2D::prepareEmbedding() {
     emb_cos = (float *)xft::alloc(max_seq_len_cached * (inv_freq_size * 2) * sizeof(float));
     emb_sin = (float *)xft::alloc(max_seq_len_cached * (inv_freq_size * 2) * sizeof(float));
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, max_seq_len_cached),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (size_t i = 0; i < max_seq_len_cached; i++) {
+#endif
         float *pcos = emb_cos + i * inv_freq_size * 2;
         float *psin = emb_sin + i * inv_freq_size * 2;
 
@@ -73,6 +81,9 @@ void RotaryEmbedding2D::prepareEmbedding() {
             psin[j + inv_freq_size] = sin_tmp;
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 // FOR PYTHON CODE LIKE BELOW:
@@ -117,8 +128,16 @@ void RotaryEmbedding2D::forward(
     const int head_size = qk_shape[3];
     const int half = inv_freq_size;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, head_num),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int head = range.begin(); head < range.end(); ++head) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int head = 0; head < head_num; ++head) {
+#endif    
         int off = head * head_size;
         int row = 0;
 
@@ -139,7 +158,9 @@ void RotaryEmbedding2D::forward(
                 float *pcos = emb_cos + pos * dim;
                 float *psin = emb_sin + pos * dim;
 
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
                 for (int i = 0; i < half; ++i) {
                     auto t1 = p1[i];
                     auto t2 = p2[i];
@@ -164,8 +185,10 @@ void RotaryEmbedding2D::forward(
                 pcos = emb_cos + pos * dim;
                 psin = emb_sin + pos * dim;
 
-#pragma omp simd
-                for (int i = 0; i < half; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
+                 for (int i = 0; i < half; ++i) {
                     auto t1 = p1[i];
                     auto t2 = p2[i];
 
@@ -184,6 +207,9 @@ void RotaryEmbedding2D::forward(
             block_position_ids += seq_len * 2;
         } // end bs
     } // end head
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void RotaryEmbedding2D::forward(

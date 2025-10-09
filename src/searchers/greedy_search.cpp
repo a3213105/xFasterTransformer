@@ -184,9 +184,18 @@ std::vector<int> GreedySearch::search(std::tuple<float *, int, int> &result) {
         float maxValues[batchSize * thrPerSample];
 
         // TODO: if sampleSize is small, possible to cause out of boundary
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, thrPerSample),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int b = range.rows().begin(); b < range.rows().end(); ++b) {
+            for (int t = range.cols().begin(); t < range.cols().end(); ++t) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
         for (int b = 0; b < batchSize; ++b) {
             for (int t = 0; t < thrPerSample; ++t) { // thread index inside the sample
+#endif
                 int start = t * sizePerThr;
                 int end = (start + sizePerThr) > sampleSize ? sampleSize : (start + sizePerThr);
                 float *p = outBuf + b * sampleSize;
@@ -205,6 +214,9 @@ std::vector<int> GreedySearch::search(std::tuple<float *, int, int> &result) {
                 maxValues[b * thrPerSample + t] = maxVal;
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
 
         // Local reduction
         for (int i = 0; i < batchSize; ++i) {
@@ -225,8 +237,16 @@ std::vector<int> GreedySearch::search(std::tuple<float *, int, int> &result) {
 
     // Each thread handle one sample (one row)
     else {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < batchSize; ++i) {
+#endif 
             int maxId = 0;
             float *p = outBuf + i * sampleSize;
             float maxVal = p[0];
@@ -239,6 +259,9 @@ std::vector<int> GreedySearch::search(std::tuple<float *, int, int> &result) {
             maxIds[i] = maxId;
             maxVals[i] = maxVal;
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Reduce to get the max index (any better method??)

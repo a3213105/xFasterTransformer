@@ -374,16 +374,25 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
     if (msgerSize > 1) {
         // Get the maximum value of each beam through all instance
         float maxVal[batchSize * numBeams];
-#pragma omp parallel for
-        for (int i = 0; i < batchSize * numBeams; ++i) {
-            maxVal[i] = std::numeric_limits<float>::lowest();
-        }
-
         float recvMax[batchSize * numBeams * msgerSize];
-#pragma omp parallel for
+        float sumVal[batchSize * numBeams];
+        float recvSum[batchSize * numBeams * msgerSize];
+        float minVal = std::numeric_limits<float>::lowest();
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize * numBeams),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < batchSize * numBeams; ++i) {
+#endif 
+            sumVal[i] = 0.0f;
+
             float *p = outBuf + i * sampleSize;
-            __m512 vmax = _mm512_set1_ps(maxVal[i]);
+            __m512 vmax = _mm512_set1_ps(minVal);
             for (int off = 0; off < sampleSize; off += 16) {
                 int remain = sampleSize - off;
                 __mmask16 mask = (remain >= 16 ? 0xffff : (1 << remain) - 1);
@@ -393,20 +402,24 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
             }
             maxVal[i] = _mm512_reduce_max_ps(vmax);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
 
         std::vector<long unsigned int> recvCount(msgerSize, static_cast<long unsigned int>(batchSize * numBeams));
         messenger.allgatherv(maxVal, batchSize * numBeams, recvMax, recvCount);
 
-        float sumVal[batchSize * numBeams];
-#pragma omp parallel for
-        for (int i = 0; i < batchSize * numBeams; ++i) {
-            sumVal[i] = 0.0f;
-        }
-
-        float recvSum[batchSize * numBeams * msgerSize];
         // Get the global sum for each beam
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize * numBeams),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < batchSize * numBeams; ++i) {
+#endif 
             maxVal[i] = recvMax[i];
             for (int j = 1; j < msgerSize; ++j) {
                 maxVal[i] = maxVal[i] > recvMax[j * batchSize * numBeams + i] ? maxVal[i]
@@ -427,11 +440,23 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
             }
             sumVal[i] = _mm512_reduce_add_ps(vsum);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
+
         messenger.allgatherv(sumVal, batchSize * numBeams, recvSum, recvCount);
 
         // Complete the LogSoftMax.
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize * numBeams),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < batchSize * numBeams; ++i) {
+#endif 
             float sum = recvSum[i];
             for (int j = 1; j < msgerSize; ++j) {
                 sum += recvSum[j * batchSize * numBeams + i];
@@ -440,8 +465,17 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
             __m512 vsub = _mm512_set1_ps(maxVal[i] + logsum);
             float *p = outBuf + i * sampleSize;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, sampleSize / 16),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int off1 = range.begin(); off1 < range.end(); ++off1) {
+                int off = off1 * 16;
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int off = 0; off < sampleSize; off += 16) {
+#endif 
                 int remain = sampleSize - off;
                 __mmask16 mask = (remain >= 16 ? 0xffff : (1 << remain) - 1);
 
@@ -449,7 +483,13 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
                 vx = _mm512_mask_sub_ps(vx, mask, vx, vsub);
                 _mm512_mask_storeu_ps(p + off, mask, vx);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     } else {
         for (int i = 0; i < batchSize * numBeams; ++i) {
             float *p = outBuf + i * sampleSize;
@@ -464,8 +504,16 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
 
     // Do topK during splited outputs on each beam's sample
     // Each thread handle one sample (one row)
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, batchSize * numBeams),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int i = 0; i < batchSize * numBeams; ++i) {
+#endif 
         std::vector<std::pair<float, int>> elements(sampleSize);
         for (int j = 0; j < sampleSize; j++) {
             elements[j] = std::make_pair(*(outBuf + i * sampleSize + j), j);
@@ -479,7 +527,9 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
             topKIds[i * kVal + j] = elements[j].second + sampleOffset;
         }
     }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
     // Reduce to get the topK index during all batch's beam and sample
     if (msgerSize > 1) {
         float sendBuf[2 * batchSize * numBeams * kVal];
@@ -494,8 +544,16 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
         std::vector<long unsigned int> recvCount(msgerSize, static_cast<long unsigned int>(sendSize));
         messenger.allgatherv(sendBuf, sendSize, recvBuf, recvCount);
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int batchIdx = range.begin(); batchIdx < range.end(); ++batchIdx) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int batchIdx = 0; batchIdx < batchSize; ++batchIdx) {
+#endif 
             std::vector<std::tuple<float, int, int>> elements(msgerSize * numBeams * kVal);
             for (int beamIdx = 0; beamIdx < numBeams; ++beamIdx) {
                 for (int i = 0; i < msgerSize; ++i) {
@@ -516,9 +574,20 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
                 nextIndices[batchIdx * kVal + i] = std::get<2>(elements[i]);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     } else {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, batchSize),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int batchIdx = range.begin(); batchIdx < range.end(); ++batchIdx) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int batchIdx = 0; batchIdx < batchSize; ++batchIdx) {
+#endif 
             std::vector<std::tuple<float, int, int>> elements(numBeams * kVal);
             for (int beamIdx = 0; beamIdx < numBeams; ++beamIdx) {
                 int idx = (batchIdx * numBeams + beamIdx) * kVal;
@@ -536,6 +605,9 @@ void BeamSearch::searchTopK(std::tuple<float *, int, int> &result) {
                 nextIndices[batchIdx * kVal + i] = std::get<2>(elements[i]);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 }
 

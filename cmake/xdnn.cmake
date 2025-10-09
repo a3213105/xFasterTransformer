@@ -24,6 +24,9 @@ project(dependency NONE)
 
 include(ExternalProject)
 
+set(XDNN_LIB "xdnn" "tbb" "tbbmalloc" "tbbmalloc_proxy")
+set(XDNN_STATIC_LIB "xdnn_static" "tbb" "tbbmalloc" "tbbmalloc_proxy")
+
 # cmake-format: off
 ExternalProject_Add(xdnn_lib
   URL               https://github.com/intel/xFasterTransformer/releases/download/IntrinsicGemm/xdnn_v1.5.9.tar.gz

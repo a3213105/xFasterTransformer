@@ -73,23 +73,44 @@ public:
         // TODO: Need further performance optimization for tanspose
         Tin* AT = (Tin*)malloc(M * K * sizeof(Tin));
         if (transA) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, K),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < K; i++) {
+#endif
                 for (int j = 0; j < M; j++) {
                     AT[j * K + i] = A[i * M + j];
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         } else {
             memcpy(AT, A, M * K * sizeof(Tin));
         }
 
-#pragma omp parallel for
-        for (uint64_t i = 0; i < K; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, K),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+        for (int i = 0; i < K; i++) {
+#endif
             Twei *dst = matrixB.Data() + i * N;
             const Twei *src = B + i * N;
             memcpy(dst, src, N * sizeof(Twei));
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         packWeight(transB, matrixB, packedB);
 
         if constexpr (std::is_same_v<Twei, bfloat16_t>) {
@@ -174,32 +195,65 @@ public:
 
         // FP32 -> FP32
         if constexpr (std::is_same_v<OriWeiT, float> && std::is_same_v<WeiT, float>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif            
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride();
                 const OriWeiT *src = weight + (rowOffset + i) * cols + colOffset;
                 memcpy(dst, src, colSize * sizeof(WeiT));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         }
 
         // FP32 -> FP16
         else if constexpr (std::is_same_v<OriWeiT, float> && std::is_same_v<WeiT, float16_t>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride();
                 const OriWeiT *src = weight + (rowOffset + i) * cols + colOffset;
                 float16_t::cvt_float_to_float16(src, dst, colSize);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // FP32 -> BF16
         else if constexpr (std::is_same_v<OriWeiT, float> && std::is_same_v<WeiT, bfloat16_t>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride();
                 const OriWeiT *src = weight + (rowOffset + i) * cols + colOffset;
                 bfloat16_t::cvt_float_to_bfloat16(src, dst, colSize);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // FP32 -> INT8/W8A8
@@ -263,22 +317,44 @@ public:
 
         // BF16 -> BF16
         else if constexpr (std::is_same_v<OriWeiT, bfloat16_t> && std::is_same_v<WeiT, bfloat16_t>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride();
                 const OriWeiT *src = weight + (rowOffset + i) * cols + colOffset;
                 memcpy(dst, src, colSize * sizeof(WeiT));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // FP16 -> FP16
         else if constexpr (std::is_same_v<OriWeiT, float16_t> && std::is_same_v<WeiT, float16_t>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride();
                 const OriWeiT *src = weight + (rowOffset + i) * cols + colOffset;
                 memcpy(dst, src, colSize * sizeof(WeiT));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // INT8 -> INT8/W8A8
@@ -290,12 +366,23 @@ public:
             zeroWeight.Resize(size);
             if (scales) memcpy(scaleWeight.Data(), scales + offset, size * sizeof(float));
             if (zeros) memcpy(zeroWeight.Data(), zeros + offset, size * sizeof(float));
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride();
                 const OriWeiT *src = weight + (rowOffset + i) * cols + colOffset;
                 memcpy(dst, src, colSize * sizeof(WeiT));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // UINT4 -> UINT4
@@ -306,19 +393,38 @@ public:
             zeroWeight.Resize(size);
             if (scales) memcpy(scaleWeight.Data(), scales + offset, size * sizeof(float));
             if (zeros) memcpy(zeroWeight.Data(), zeros + offset, size * sizeof(float));
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride() / 2;
                 const OriWeiT *src = weight + (rowOffset + i) * cols / 2 + colOffset / 2;
                 memcpy(dst, src, colSize * sizeof(WeiT) / 2);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // INT8 -> BF16
         else if constexpr (std::is_same_v<OriWeiT, int8_t> && std::is_same_v<WeiT, bfloat16_t>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
-                for (uint64_t j = 0; j < colSize; j++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
+                for (int j = 0; j < colSize; j++) {
                     const int8_t src = weight[(rowOffset + i) * cols + colOffset + j];
                     bfloat16_t *dst = convertedWeight.Data() + i * convertedWeight.Stride() + j;
                     float scale = scales[colOffset + j];
@@ -326,13 +432,24 @@ public:
                     *dst = static_cast<bfloat16_t>(scale * src + zero);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         // UINT4 -> BF16
         else if constexpr (std::is_same_v<OriWeiT, uint4x2_t> && std::is_same_v<WeiT, bfloat16_t>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
-                for (uint64_t j = 0; j < colSize; j+=2) {
+            #if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
+                for (int j = 0; j < colSize; j+=2) {
                     const uint4x2_t *src = weight + (rowOffset + i) * cols / 2 + colOffset / 2 + j / 2;
                     bfloat16_t *dst = convertedWeight.Data() + i * convertedWeight.Stride() + j;
                     float scale1 = scales[colOffset + j];
@@ -343,15 +460,29 @@ public:
                     dst[1] = static_cast<bfloat16_t>(scale2 * src->get_v2() + zero2);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
         // e4m3 -> e4m3
         else if constexpr (std::is_same_v<OriWeiT, e4m3_t> && std::is_same_v<WeiT, e4m3_t>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < rowSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, rowSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < rowSize; i++) {
+#endif 
                 WeiT *dst = convertedWeight.Data() + i * convertedWeight.Stride();
                 const OriWeiT *src = weight + (rowOffset + i) * cols + colOffset;
                 memcpy(dst, src, colSize * sizeof(WeiT));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         else {
@@ -362,13 +493,24 @@ public:
         // Compute per column Sums for W8A8
         if constexpr (std::is_same_v<WeiT, w8a8_t>) {
             sumWeight.Resize(trans ? rowSize : colSize);
-#pragma omp parallel for
-            for (uint64_t i = 0; i < colSize; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, colSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < colSize; i++) {
+#endif
                 sumWeight.Data()[i] = 0.0f;
-                for (uint64_t j = 0; j < rowSize; j++) {
+                for (int j = 0; j < rowSize; j++) {
                     sumWeight.Data()[i] += convertedWeight.Data()[j * convertedWeight.Stride() + i];
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         }
     }
 
@@ -708,15 +850,27 @@ public:
                 assert(blockSize == 128);
                 if (lds == -1) lds = (rows + 127) / 128;
 
-#pragma omp parallel for collapse(2)
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                tbb::parallel_for(tbb::blocked_range2d<int, int>(0, cols, 0, rows / 2),
+                [&](const tbb::blocked_range2d<int, int>& range) {
+                for (int j = range.rows().begin(); j < range.rows().end(); j+=64) {
+                    for (int i = range.cols().begin(); i < range.cols().end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
                 for (int j = 0; j < cols; j += 64) {
                     for (int i = 0; i < rows / 2; ++i) { // 2 rows merged into 1
+#endif
                         int offset = j * rows + i * 128;
                         int scaleOff = j / 128 * lds + i / 64;
                         e4m3_t::to_bf16(packedB + offset, (uint16_t *)decodedB + offset, 128, scaleB[scaleOff]);
                     }
                 }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                });
+#endif
                 // Call into BF16 oneDNN gemm
                 GEMMVERBOSE("onednn_amx_gemm_compute",
                         onednn_amx_gemm_compute(transA, M, N, K, alpha, A, lda, decodedB, beta, C, ldc));
@@ -1526,15 +1680,26 @@ public:
                 assert(blockSize == 128);
                 if (lds == -1) lds = (rows + 127) / 128;
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                tbb::parallel_for(tbb::blocked_range2d<int, int>(0, cols, 0, rows / 2),
+                [&](const tbb::blocked_range2d<int, int>& range) {
+                for (int j = range.rows().begin(); j < range.rows().end(); j+=64) {
+                    for (int i = range.cols().begin(); i < range.cols().end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
                 for (int j = 0; j < cols; j += 64) {
                     for (int i = 0; i < rows / 2; ++i) { // 2 rows merged into 1
+#endif
                         int offset = j * rows + i * 128;
                         int scaleOff = j / 128 * lds + i / 64;
                         e4m3_t::to_bf16(packedB + offset, (uint16_t *)decodedB + offset, 128, scaleB[scaleOff]);
                     }
                 }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                });
+#endif
                 // Call into BF16 oneDNN gemm
                 GEMMVERBOSE("onednn_amx_gemm_compute_residential",
                         onednn_amx_gemm_compute_residential(
@@ -1565,9 +1730,18 @@ public:
                         xdnn_sgemm_f32f16f32_compute_resext(transA, M, N, K, alpha, A, lda, (const XDNN_FP16 *)packedB,
                                 beta, C, ldc, bias, gamma, res, ldres));
             } else {
-#pragma omp parallel for collapse(2)
-                for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                tbb::parallel_for(tbb::blocked_range2d<int, int>(0, M, 0, N),
+                [&](const tbb::blocked_range2d<int, int>& range) {
+                for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+                    for (int j = range.cols().begin(); j < range.cols().end(); ++j) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+                for (int i = 0; i < M; ++i) {
                     for (int j = 0; j < N; ++j) {
+#endif
                         auto remain = N - j;
                         __mmask16 mask = (remain >= 16 ? 0xffff : (1 << remain) - 1);
                         auto v = xft::load_avx512(mask, &res[i * ldres + j]);
@@ -1575,7 +1749,9 @@ public:
                         xft::store_avx512(&res[i * ldres + j], mask, v);
                     }
                 }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                });
+#endif
                 GEMMVERBOSE("onednn_gemm_compute_resext",
                         onednn_gemm_compute(transA, M, N, K, alpha, A, lda, packedB, beta, C, ldc, bias, res, ldres,
                                 matmul_kinds::Residential));
@@ -1613,9 +1789,18 @@ public:
 #elif defined(AVX512_BF16_WEIGHT_ONLY_BF16)
             if constexpr (std::is_same_v<InT, bfloat16_t>) {
                 TimeLine t("onednn_amx_gemm_compute_residential");
-#pragma omp parallel for collapse(2)
-                for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                tbb::parallel_for(tbb::blocked_range2d<int, int>(0, M, 0, N),
+                [&](const tbb::blocked_range2d<int, int>& range) {
+                for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+                    for (int j = range.cols().begin(); j < range.cols().end(); ++j) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+                for (int i = 0; i < M; ++i) {
                     for (int j = 0; j < N; ++j) {
+#endif
                         auto remain = N - j;
                         __mmask16 mask = (remain >= 16 ? 0xffff : (1 << remain) - 1);
                         auto v = xft::load_avx512(mask, &res[i * ldres + j]);
@@ -1623,17 +1808,32 @@ public:
                         xft::store_avx512(&res[i * ldres + j], mask, v);
                     }
                 }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                });
+#endif
                 onednn_amx_gemm_compute_residential(
                         transA, M, N, K, alpha, A, lda, packedB, beta, C, ldc, bias, res, ldres);
             } else {
                 if (M > AMXThresholdM) {
                     TimeLine t("onednn_amx_gemm_compute_residential");
-#pragma omp parallel for collapse(2)
-                    for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, M, 0, N),
+                    [&](const tbb::blocked_range2d<int, int>& range) {
+                    for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+                        for (int j = range.cols().begin(); j < range.cols().end(); ++j) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+                    for (int i = 0; i < M; ++i) {
                         for (int j = 0; j < N; ++j) {
+#endif
                             res[i * ldres + j] = res[i * ldres + j] * gamma;
                         }
                     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+                });
+#endif
                     onednn_amx_gemm_compute_residential(
                             transA, M, N, K, alpha, A, lda, packedB, beta, C, ldc, bias, res, ldres);
                 } else {
@@ -2092,8 +2292,16 @@ private:
         TimeLine t2("onednn_gemm_compute.execute_primitive");
         // Reorder
         if constexpr (std::is_same_v<Tin, float> && !std::is_same_v<Twei, float>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < M; ++i) {
+#endif
                 void *input_ptr = input_mem.get_data_handle();
                 if constexpr (std::is_same_v<Twei, bfloat16_t>) {
                     bfloat16_t::cvt_float_to_bfloat16(A + i * lda, (bfloat16_t *)input_ptr + i * K, K);
@@ -2112,6 +2320,9 @@ private:
                     exit(-1);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         matmul_prim->execute(*stream, matmul_args);
@@ -2227,14 +2438,25 @@ private:
         TimeLine t2("onednn_amx_gemm_compute.execute_primitive");
         // Reorder
         if constexpr (std::is_same_v<Tin, float>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < M; ++i) {
+#endif
                 if constexpr (std::is_same_v<Twei, float16_t>) {
                     float16_t::cvt_float_to_float16(A + i * lda, (float16_t *)input_mem.get_data_handle() + i * K, K);
                 } else if constexpr (std::is_same_v<Twei, bfloat16_t>) {
                     bfloat16_t::cvt_float_to_bfloat16(A + i * lda, (bfloat16_t *)input_mem.get_data_handle() + i * K, K);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         matmul_prim->execute(*stream, matmul_args);
@@ -2325,14 +2547,25 @@ private:
         TimeLine t2("onednn_amx_gemm_compute_biasadd.execute_primitive");
         // Reorder
         if constexpr (std::is_same_v<Tin, float>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < M; ++i) {
+#endif
                 if constexpr (std::is_same_v<Twei, float16_t>) {
                     float16_t::cvt_float_to_float16(A + i * lda, (float16_t *)input_mem.get_data_handle() + i * K, K);
                 } else if constexpr (std::is_same_v<Twei, bfloat16_t>) {
                     bfloat16_t::cvt_float_to_bfloat16(A + i * lda, (bfloat16_t *)input_mem.get_data_handle() + i * K, K);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         matmul_prim->execute(*stream, matmul_args);
@@ -2431,14 +2664,25 @@ private:
         TimeLine t2("onednn_amx_gemm_compute_biasadd_relu.execute_primitive");
         // Reorder
         if constexpr (std::is_same_v<Tin, float>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < M; ++i) {
+#endif
                 if constexpr (std::is_same_v<Twei, float16_t>) {
                     float16_t::cvt_float_to_float16(A + i * lda, (float16_t *)input_mem.get_data_handle() + i * K, K);
                 } else if constexpr (std::is_same_v<Twei, bfloat16_t>) {
                     bfloat16_t::cvt_float_to_bfloat16(A + i * lda, (bfloat16_t *)input_mem.get_data_handle() + i * K, K);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         matmul_prim->execute(*stream, matmul_args);
@@ -2520,10 +2764,21 @@ private:
         dnnl::memory scale_mem;
         if (C == res) {
             scale_mem = memory(scale_md, *engine);
-#pragma omp parallel for
-            for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < M; ++i) {
+#endif
                 memcpy((Tin *)scale_mem.get_data_handle() + i * N, res + i * ldres, N * sizeof(Tin));
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         } else {
             scale_mem = memory(scale_md, *engine, (void *)res);
         }
@@ -2555,14 +2810,25 @@ private:
 
         // Reorder
         if constexpr (std::is_same_v<Tin, float>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < M; ++i) {
+#endif
                 if constexpr (std::is_same_v<Twei, float16_t>) {
                     float16_t::cvt_float_to_float16(A + i * lda, (float16_t *)input_mem.get_data_handle() + i * K, K);
                 } else if constexpr (std::is_same_v<Twei, bfloat16_t>) {
                     bfloat16_t::cvt_float_to_bfloat16(A + i * lda, (bfloat16_t *)input_mem.get_data_handle() + i * K, K);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         matmul_prim->execute(*stream, matmul_args);
@@ -2680,14 +2946,25 @@ private:
         TimeLine t2("onednn_amx_gemm_compute_bias_residential.execute_primitive");
         // Reorder
         if constexpr (std::is_same_v<Tin, float>) {
-#pragma omp parallel for
-            for (uint64_t i = 0; i < M; ++i) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
+            for (int i = 0; i < M; ++i) {
+#endif
                 if constexpr (std::is_same_v<Twei, float16_t>) {
                     float16_t::cvt_float_to_float16(A + i * lda, (float16_t *)input_mem.get_data_handle() + i * K, K);
                 } else if constexpr (std::is_same_v<Twei, bfloat16_t>) {
                     bfloat16_t::cvt_float_to_bfloat16(A + i * lda, (bfloat16_t *)input_mem.get_data_handle() + i * K, K);
                 }
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
         matmul_prim->execute(*stream, matmul_args);
@@ -2812,8 +3089,16 @@ private:
     // sum = sum_of_one_row(qweight * scale + zero)
     void quantize_s8(
             int M, int N, const float *src, int lda, int8_t *dst, int ldb, float *scale, float *zero, float *sum) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<uint16_t>(0, M),
+        [&](const tbb::blocked_range<uint16_t>& range) {
+        for (uint16_t i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (uint16_t i = 0; i < M; i++) {
+#endif
             __m512 vmax = _mm512_loadu_ps(src + i * lda);
             __m512 vmin = vmax;
             for (int j = 16; j < N; j += 16) {
@@ -2852,20 +3137,35 @@ private:
             }
             sum[i] = _mm512_reduce_add_epi32(vsum) * fscale + N * fzero;
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     template <typename DequantOp, typename PostOp>
     void dequant_base(int M, int N, const int32_t *C_int32, const int ldc_int32, float *C, const int ldc,
             const DequantOp &dequant_op, const PostOp &post_op) {
-#pragma omp parallel for collapse(2)
-        for (uint64_t i = 0; i < M; i++) {
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range2d<int, int>(0, M, 0, N),
+        [&](const tbb::blocked_range2d<int, int>& range) {
+        for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+            for (int j = range.cols().begin(); j < range.cols().end(); j+=16) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+        for (int i = 0; i < M; i++) {
             for (int j = 0; j < N; j += 16) {
+#endif
                 __m512i xi = _mm512_load_epi32(C_int32 + i * ldc_int32 + j);
                 __m512 x = dequant_op(xi, i, j);
                 x = post_op(x, i, j);
                 _mm512_storeu_ps(C + i * ldc + j, x);
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // dequant C_int32 to C

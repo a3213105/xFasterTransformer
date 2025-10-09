@@ -121,8 +121,16 @@ public:
                     hiddenSize * kvResponsibleCols * sizeof(OriWeiT) / sizeFactor);
         } else {
             int qkvStride = (ctx->attHeadNum + ctx->kvHeadNum + ctx->kvHeadNum) * ctx->attHeadSize;
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, hiddenSize),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < hiddenSize; ++i) {
+#endif
                 memcpy(concatBuf + i * responsibleCols / sizeFactor,
                         queryWeight + i * qkvStride / sizeFactor + this->startQHead * headSize / sizeFactor,
                         qResponsibleCols * sizeof(OriWeiT) / sizeFactor);
@@ -134,6 +142,9 @@ public:
                         valueWeight + i * qkvStride / sizeFactor + this->startKVHead * headSize / sizeFactor,
                         kvResponsibleCols * sizeof(OriWeiT) / sizeFactor);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
         float *concatScale = nullptr;
         float *concatZero = nullptr;
@@ -845,13 +856,23 @@ protected:
         int batchSize = ctx->batchSize;
         int headSize = ctx->attHeadSize;
 
-#pragma omp parallel for collapse(3)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, batchSize, 0, (this->endKVHead - this->startKVHead), 0, ctx->inputSeqLen),
+        [&](const tbb::blocked_range3d<int, int, int>& range) {
+        for (int b = range.pages().begin(); b < range.pages().end(); ++b) {
+            for (int h = range.rows().begin(); h < range.rows().end(); ++h) {
+                for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) 
+#   endif
         for (int b = 0; b < batchSize; ++b) {
             for (int h = 0; h < (this->endKVHead - this->startKVHead); ++h) {
                 // Copy current key/value to cached keys/values
                 // Re-layout is needed: (bs, seq=1, hidden_size) -> (seq=1, bs, hidden_size)
                 // Be noted: for group attention, the key/value is less than query
                 for (int seq = 0; seq < ctx->inputSeqLen; ++seq) {
+#endif
                     auto srcK = key.Row(b * ctx->inputSeqLen + seq) + h * headSize;
                     auto dstK = presentKey.getSequence(pastSeqLen + seq, b, h);
 
@@ -863,7 +884,11 @@ protected:
                 }
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
+
 
     template <typename KVCacheT>
     void copyKVCache(DecoderContext *ctx, xft::Matrix<ImT> &key, xft::Matrix<ImT> &value,
@@ -882,13 +907,23 @@ protected:
             maxSeqLen = std::max(maxSeqLen, inputSeqLens[i]);
         }
 
-#pragma omp parallel for collapse(3)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, batchSize, 0, (this->endKVHead - this->startKVHead), 0, maxSeqLen),
+        [&](const tbb::blocked_range3d<int, int, int>& range) {
+        for (int b = range.pages().begin(); b < range.pages().end(); ++b) {
+            for (int h = range.rows().begin(); h < range.rows().end(); ++h) {
+                for (int seq = range.cols().begin(); seq < range.cols().end(); ++seq) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) 
+#   endif
         for (int b = 0; b < batchSize; ++b) {
             for (int h = 0; h < (this->endKVHead - this->startKVHead); ++h) {
                 // Copy current key/value to cached keys/values
                 // Re-layout is needed: (bs, seq=1, hidden_size) -> (seq=1, bs, hidden_size)
                 // Be noted: for group attention, the key/value is less than query
                 for (int seq = 0; seq < maxSeqLen; ++seq) {
+#endif
                     if (seq >= inputSeqLens[b]) continue;
                     auto srcK = key.Row(seqStartLoc[b] + seq) + h * headSize;
                     auto dstK = keyCaches[b]->getSequence(pastSeqLens[b] + seq, 0, h);
@@ -901,6 +936,9 @@ protected:
                 }
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Copy one head from key or value to K cache or V cache
@@ -1021,10 +1059,20 @@ protected:
         auto bufSizeRequired = ctx->numThreads * mBlockSize * scoreStride;
         float *scoreBuf = (float *)SimpleMemPool::instance().getBuffer("scoreBuf", sizeof(float) * bufSizeRequired);
 
-#pragma omp parallel for collapse(3)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range3d<int, int, int>(0, batchSize, 0, responsibleHeads, 0, mBlockNum),
+        [&](const tbb::blocked_range3d<int, int, int>& range) {
+        for (int b = range.pages().begin(); b < range.pages().end(); ++b) {
+            for (int i = range.rows().begin(); i < range.rows().end(); ++i) {
+                for (int mb = range.cols().begin(); mb < range.cols().end(); ++mb) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(3) 
+#   endif
         for (int b = 0; b < batchSize; ++b) {
             for (int i = 0; i < responsibleHeads; ++i) {
                 for (int mb = 0; mb < mBlockNum; ++mb) {
+#endif
                     const int startSeq = mb * mBlockSize;
                     const int endSeq
                             = startSeq + mBlockSize < ctx->inputSeqLen ? startSeq + mBlockSize : ctx->inputSeqLen;
@@ -1042,7 +1090,7 @@ protected:
                     int ldc = scoreStride;
                     auto A = query.Row(b * ctx->inputSeqLen + startSeq) + i * ctx->attHeadSize; // updated
                     auto B = std::get<0>(keyMatInfo);
-                    auto C = scoreBuf + omp_get_thread_num() * mBlockSize * scoreStride;
+                    auto C = scoreBuf + parallel_get_thread_num() * mBlockSize * scoreStride;
 
                     const int queryLen = ctx->inputSeqLen;
                     const int keyLen = pastSeqLen + ctx->inputSeqLen;
@@ -1091,6 +1139,9 @@ protected:
                 } // end for mb
             } // end for i
         } // end for b
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // When #heads is very few, need to shard each head to use more resources
@@ -1150,9 +1201,18 @@ protected:
             kvStride = kvCols * 2;
             AttnT *kvBuf = (AttnT *)SimpleMemPool::instance().getBuffer(
                     "flashKVBuf", totalTokenSize * kvStride * sizeof(AttnT));
-#pragma omp parallel for collapse(2)
-            for (uint64_t seq = 0; seq < totalTokenSize; ++seq)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range2d<uint64_t, uint64_t>(0, totalTokenSize, 0, kvCols * 2),
+            [&](const tbb::blocked_range2d<uint64_t, uint64_t>& range) {
+            for (uint64_t seq = range.rows().begin(); seq < range.rows().end(); ++seq) {
+                for (uint64_t i = range.cols().begin(); i < range.cols().end(); i+= headSize) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+            for (uint64_t seq = 0; seq < totalTokenSize; ++seq) {
                 for (uint64_t i = 0; i < kvCols * 2; i += headSize) {
+#endif
                     const ImT *srcPtr = key.Data() + seq * qkvCols + i;
                     AttnT *dstPtr = kvBuf + seq * kvStride + i;
                     if constexpr (std::is_same_v<AttnT, bfloat16_t> && std::is_same_v<ImT, float>) {
@@ -1168,6 +1228,10 @@ protected:
                         exit(-1);
                     }
                 }
+            }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
 
             k = kvBuf;
             v = kvBuf + kvCols;
@@ -1220,9 +1284,19 @@ protected:
             kvStride = kvCols * 2;
             AttnT *kvBuf = (AttnT *)SimpleMemPool::instance().getBuffer(
                     "flashKVBuf", totalTokenSize * kvStride * sizeof(AttnT));
-#pragma omp parallel for collapse(2)
-            for (uint64_t seq = 0; seq < totalTokenSize; ++seq)
+
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range2d<uint64_t, uint64_t>(0, totalTokenSize, 0, kvCols * 2),
+            [&](const tbb::blocked_range2d<uint64_t, uint64_t>& range) {
+            for (uint64_t seq = range.rows().begin(); seq < range.rows().end(); ++seq) {
+                for (uint64_t i = range.cols().begin(); i < range.cols().end(); i+= headSize) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2) 
+#   endif
+            for (uint64_t seq = 0; seq < totalTokenSize; ++seq) {
                 for (uint64_t i = 0; i < kvCols * 2; i += headSize) {
+#endif
                     const ImT *srcPtr = key.Data() + seq * qkvCols + i;
                     AttnT *dstPtr = kvBuf + seq * kvStride + i;
                     if constexpr (std::is_same_v<AttnT, bfloat16_t> && std::is_same_v<ImT, float>) {
@@ -1238,6 +1312,10 @@ protected:
                         exit(-1);
                     }
                 }
+            }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
 
             k = kvBuf;
             v = kvBuf + kvCols;

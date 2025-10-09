@@ -15,6 +15,8 @@
 #include "layers_rotary_embedding.h"
 #include "compile_util.h"
 #include "bfloat16.h"
+#include "thread_util.h"
+
 namespace xft {
 
 void rotaryEmbeddingKernel(const int64_t *positionIds, float *query, float *key, const float *embCos,
@@ -23,8 +25,16 @@ void rotaryEmbeddingKernel(const int64_t *positionIds, float *query, float *key,
     REQUIRES(dim == headSize, "Incorrect shape, rot_dim is not the head size.");
     const int half = (dim + 1) / 2;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, headNum),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int head = range.begin(); head < range.end(); ++head) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int head = 0; head < headNum; ++head) {
+#endif
         int off = head * dim;
 
         for (int row = 0; row < numTokens; ++row) {
@@ -35,7 +45,9 @@ void rotaryEmbeddingKernel(const int64_t *positionIds, float *query, float *key,
             const float *pcos = embCos + pos * dim;
             const float *psin = embSin + pos * dim;
 
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int i = 0; i < half; ++i) {
                 auto t1 = p1[i];
                 auto t2 = p2[i];
@@ -48,6 +60,9 @@ void rotaryEmbeddingKernel(const int64_t *positionIds, float *query, float *key,
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void rotaryEmbeddingKernel(const int64_t *position_ids, bfloat16_t *query, bfloat16_t *key, const bfloat16_t *embCos,
@@ -56,8 +71,16 @@ void rotaryEmbeddingKernel(const int64_t *position_ids, bfloat16_t *query, bfloa
     REQUIRES(dim == headSize, "Incorrect shape, rot_dim is not the head size.");
     const int half = (dim + 1) / 2;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, headNum),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int head = range.begin(); head < range.end(); ++head) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
     for (int head = 0; head < headNum; ++head) {
+#endif
         int off = head * dim;
 
         for (int row = 0; row < numTokens; ++row) {
@@ -68,7 +91,9 @@ void rotaryEmbeddingKernel(const int64_t *position_ids, bfloat16_t *query, bfloa
             const bfloat16_t *pcos = embCos + pos * dim;
             const bfloat16_t *psin = embSin + pos * dim;
 
-#pragma omp simd
+#if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp simd
+#endif
             for (int i = 0; i < half; ++i) {
                 auto t1 = p1[i];
                 auto t2 = p2[i];
@@ -81,6 +106,9 @@ void rotaryEmbeddingKernel(const int64_t *position_ids, bfloat16_t *query, bfloa
             }
         }
     }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void invokeRotaryEmbedding(DataType dt, const int64_t *positionIds, void *query, void *key, const void *embCos,

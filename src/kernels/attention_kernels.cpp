@@ -16,6 +16,7 @@
 #include "decoder_util.h"
 #include "gemm_kernel_ext.h"
 #include "layers_attention.h"
+#include "thread_util.h"
 
 namespace xft {
 
@@ -43,9 +44,18 @@ void crossAttention(bfloat16_t *output, bfloat16_t *query, bfloat16_t *key, bflo
     int thrScoreSize = (maxCtxSize + 15) / 16 * 16;
     float *scores = (float *)SimpleMemPool::instance().getBuffer("qkscore", threadNum * thrScoreSize * sizeof(float));
 
-#pragma omp parallel for collapse(2)
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, batchSize, 0, qHeadNum),
+    [&](const tbb::blocked_range2d<int, int>& range) {
+    for (int b = range.rows().begin(); b < range.rows().end(); ++b) {
+        for (int i = range.cols().begin(); i < range.cols().end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for collapse(2)
+#   endif
     for (int b = 0; b < batchSize; ++b) {
         for (int i = 0; i < qHeadNum; ++i) {
+#endif
             int *blkIndices = blockTables + blkOffsets[b];
 
             // Copy one head of current key to cached keys
@@ -61,7 +71,7 @@ void crossAttention(bfloat16_t *output, bfloat16_t *query, bfloat16_t *key, bflo
             int ldc = n;
             auto A = query + i * headSize;
             auto baseB = (bfloat16_t *)kcache + i * headSize;
-            auto C = scores + omp_get_thread_num() * thrScoreSize;
+            auto C = scores + parallel_get_thread_num() * thrScoreSize;
 
             small_sgemm_bf16bf16f32_b(true, m, n, k, (XDNN_BF16 *)A, lda, (XDNN_BF16 *)baseB, ldb, C, ldc, blkIndices,
                     cacheBlkStride, cacheBlkSize);
@@ -110,6 +120,9 @@ void crossAttention(bfloat16_t *output, bfloat16_t *query, bfloat16_t *key, bflo
 #endif
         } // end for i
     } // end for b
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void invokeAttention(DataType dt, void *__restrict__ output, const void *__restrict__ query,
@@ -123,11 +136,12 @@ void invokeAttention(DataType dt, void *__restrict__ output, const void *__restr
     int kvHeadNum = kv_shape[1];
 
     if (unlikely(threadNum == 0)) {
-#pragma omp parallel
-        {
-            int tid = omp_get_thread_num();
-            if (tid == 0) { threadNum = omp_get_num_threads(); }
-        }
+        threadNum = parallel_get_num_threads(); 
+// # pragma omp parallel
+//         {
+//             int tid = parallel_get_thread_num();
+//             if (tid == 0) { threadNum = parallel_get_num_threads(); }
+//         }
     }
 
     if (dt == DataType::bf16) {

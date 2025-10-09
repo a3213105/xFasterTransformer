@@ -119,15 +119,37 @@ public:
         // Copy if input and output are different, so that the residual connection can be done
         Messenger &messenger = Messenger::getInstance();
         if ((void *)input != (void *)output && messenger.isMaster()) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < M; ++i) {
+#endif  
                 xft::copy(output + i * oStride, input + i * iStride, hiddenSize);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         } else {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            tbb::parallel_for(tbb::blocked_range<int>(0, M),
+            [&](const tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
             for (int i = 0; i < M; ++i) {
+#endif  
                 memset(output + i * oStride, 0, sizeof(OutT) * hiddenSize);
             }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+            });
+#endif
         }
 
 #ifdef XFT_DEBUG
@@ -154,11 +176,21 @@ public:
 #endif
 
         // Softmax
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, M),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; ++i) {
+#endif  
             DecoderUtil::computeSoftmax(gateLogits + i * expertNum, expertNum);
         }
-
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
 #ifdef XFT_DEBUG
         dbg.debugPrint("Gate After Softmax: \n");
         dbg.dumpMatrix(gateLogits, M, expertNum, expertNum);
@@ -247,20 +279,42 @@ private:
 
     // Gather input for expert i
     void gatherInput(ImT *expertData, int hiddenSize, ImT *input, int iStride, const std::vector<int> &idx) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, idx.size()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (size_t i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (size_t i = 0; i < idx.size(); ++i) {
+#endif  
             memcpy(expertData + i * hiddenSize, input + idx[i] * iStride, hiddenSize * sizeof(ImT));
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // Scatter output of expert i
     void scatterOutput(OutT *output, int oStride, ImT *expertData, int hiddenSize, const std::vector<int> &idx,
             const std::vector<float> &weights) {
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, idx.size()),
+        [&](const tbb::blocked_range<int>& range) {
+        for (size_t i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (size_t i = 0; i < idx.size(); ++i) {
+#endif 
             float scale = weights[i];
             xft::addto(output + idx[i] * oStride, expertData + i * hiddenSize, scale, hiddenSize);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
     // TODO: abstract this function to a common place, which can be used by deepseek
@@ -282,13 +336,32 @@ private:
     template <typename T>
     void selectTopKExperts(T *logits, int K, int M, int N, int *selExperts, float *expertWeight) {
         // TODO: optimize
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, M),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; ++i) {
+#endif 
             topK(logits + i * N, N, K, selExperts + i * K, expertWeight + i * K);
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
         // Norm
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        tbb::parallel_for(tbb::blocked_range<int>(0, M),
+        [&](const tbb::blocked_range<int>& range) {
+        for (int i = range.begin(); i < range.end(); ++i) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for
+#   endif
         for (int i = 0; i < M; ++i) {
+#endif 
             // add a small value to avoid div 0
             float sum = 1e-20f;
             for (int j = 0; j < K; j += 16) {
@@ -306,6 +379,9 @@ private:
                 xft::store_avx512(expertWeight + i * K + j, mask, _mm512_mul_ps(v, vsum));
             }
         }
+#if THREAD_TYPE == THREAD_TYPE_TBB
+        });
+#endif
     }
 
 private:

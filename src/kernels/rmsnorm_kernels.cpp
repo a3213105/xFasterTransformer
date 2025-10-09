@@ -21,6 +21,7 @@
 #include "intrinsics_util.h"
 #include "my_types.h"
 #include "rmsnorm_kernels.h"
+#include "thread_util.h"
 
 namespace xft {
 
@@ -38,8 +39,16 @@ void rmsNorm(Tout *output, const Tin *input, const Twei *weight, int rows, int c
     if (iStride == -1) iStride = cols;
     if (oStride == -1) oStride = cols;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, rows),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int r = range.begin(); r < range.end(); ++r) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for 
+#   endif
     for (int r = 0; r < rows; ++r) {
+#endif
         const Tin *px = input + r * iStride;
         Tout *py = output + r * oStride;
 
@@ -81,6 +90,9 @@ void rmsNorm(Tout *output, const Tin *input, const Twei *weight, int rows, int c
             xft::store_avx512(py + col, mask, vy);
         }
     } // end for rows
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void rmsNorm(bfloat16_t *output, const bfloat16_t *input, const bfloat16_t *weight, int rows, int cols, int iStride,
@@ -90,8 +102,16 @@ void rmsNorm(bfloat16_t *output, const bfloat16_t *input, const bfloat16_t *weig
     if (iStride == -1) iStride = cols;
     if (oStride == -1) oStride = cols;
 
-#pragma omp parallel for
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, rows),
+    [&](const tbb::blocked_range<int>& range) {
+    for (int r = range.begin(); r < range.end(); ++r) {
+#else
+#   if THREAD_TYPE == THREAD_TYPE_OMP
+#   pragma omp parallel for 
+#   endif
     for (int r = 0; r < rows; ++r) {
+#endif
         const bfloat16_t *px = input + r * iStride;
         bfloat16_t *py = output + r * oStride;
 
@@ -133,6 +153,9 @@ void rmsNorm(bfloat16_t *output, const bfloat16_t *input, const bfloat16_t *weig
             _mm512_mask_storeu_pbh(py + col, mask, vy);
         }
     } // end for rows
+#if THREAD_TYPE == THREAD_TYPE_TBB
+    });
+#endif
 }
 
 void rmsNorm(float *output, const float *input, const float *weight, int rows, int cols, int iStride, int oStride,
